@@ -21,7 +21,7 @@ from collections import Counter, defaultdict
 
 from dotenv import load_dotenv
 from openai import OpenAI
-from telegram import Update, BotCommand
+from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 load_dotenv()
@@ -3101,39 +3101,8 @@ async def favorite_current(update: Update, context: ContextTypes.DEFAULT_TYPE, k
     await weather(update, context)
 
 
-
-async def setup_bot_commands(app):
-    commands = [
-        BotCommand("weather", "Текущая погода"),
-        BotCommand("tomorrow", "Прогноз на завтра"),
-        BotCommand("weekend", "Прогноз на выходные"),
-        BotCommand("week", "Прогноз на неделю"),
-        BotCommand("today_parts", "Сегодня по частям дня"),
-        BotCommand("tomorrow_parts", "Завтра по частям дня"),
-        BotCommand("weekend_parts", "Выходные по частям дня"),
-        BotCommand("week_parts", "Неделя по частям дня"),
-        BotCommand("alerts", "Погодные alerts"),
-        BotCommand("danger_alerts", "Опасные погодные явления"),
-        BotCommand("subscribe_danger_alerts", "Подписка на danger alerts"),
-        BotCommand("danger_status", "Статус danger alerts"),
-        BotCommand("morning", "Утренний прогноз"),
-        BotCommand("subscribe_morning", "Подписка на утренний прогноз"),
-        BotCommand("set_morning_time", "Время утреннего прогноза"),
-        BotCommand("trip", "Режим поездки"),
-        BotCommand("baidarka", "Режим байдарки"),
-        BotCommand("camping", "Режим палатки"),
-        BotCommand("dashboard", "Dashboard"),
-        BotCommand("scores", "Веса моделей"),
-        BotCommand("adaptive", "Adaptive weights"),
-        BotCommand("status", "Статус бота"),
-        BotCommand("set_home", "Изменить домашнюю локацию"),
-    ]
-
-    await app.bot.set_my_commands(commands)
-
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
-    app.post_init = setup_bot_commands
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("weather", weather))
@@ -3202,6 +3171,35 @@ def main():
         )
 
     print("Бот запущен...")
+    async def setup_bot_commands(app):
+    commands = [
+        BotCommand("weather", "Текущая погода"),
+        BotCommand("tomorrow", "Прогноз на завтра"),
+        BotCommand("weekend", "Прогноз на выходные"),
+        BotCommand("week", "Прогноз на неделю"),
+
+        BotCommand("today_parts", "Сегодня по частям дня"),
+        BotCommand("tomorrow_parts", "Завтра по частям дня"),
+        BotCommand("weekend_parts", "Выходные по частям дня"),
+
+        BotCommand("alerts", "Погодные alerts"),
+        BotCommand("danger_alerts", "Опасные погодные явления"),
+
+        BotCommand("morning", "Утренний прогноз"),
+        BotCommand("subscribe_morning", "Подписка на утренний прогноз"),
+
+        BotCommand("trip", "Режим поездки"),
+        BotCommand("baidarka", "Режим байдарки"),
+        BotCommand("camping", "Режим палатки"),
+
+        BotCommand("dashboard", "Dashboard"),
+        BotCommand("scores", "Веса моделей"),
+        BotCommand("status", "Статус бота"),
+
+        BotCommand("set_home", "Изменить домашнюю локацию"),
+    ]
+
+    await app.bot.set_my_commands(commands)
     app.run_polling()
 
 
