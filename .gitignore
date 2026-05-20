@@ -1,0 +1,12 @@
+.env
+venv/
+__pycache__/
+*.pyc
+weather_history.json
+model_scores.json
+rain_scores.json
+morning_subscribers.json
+danger_subscribers.json
+learning_forecasts.json
+settings.json
+visual_dashboard.png
