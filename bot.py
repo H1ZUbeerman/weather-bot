@@ -1,6 +1,7 @@
 import os
 import json
 import requests
+from storage.user_settings import get_user_settings, update_user_setting
 from weather.messages import *
 from outdoor.messages import *
 from outdoor.advisors import *
@@ -73,6 +74,46 @@ def simple_average(values):
     if not values:
         return 0
     return round(sum(values) / len(values), 1)
+
+
+def get_user_home_location_key(chat_id):
+    user_settings = get_user_settings(chat_id)
+    return user_settings.get("home_location_key", "home")
+
+
+def get_user_home_location(chat_id):
+    home_key = get_user_home_location_key(chat_id)
+    return FAVORITE_LOCATIONS.get(home_key, FAVORITE_LOCATIONS["home"])
+
+
+def get_user_morning_time(chat_id):
+    user_settings = get_user_settings(chat_id)
+    return user_settings.get("morning_time", "08:00")
+
+
+def get_user_timezone(chat_id):
+    user_settings = get_user_settings(chat_id)
+    return user_settings.get("timezone", "Europe/Moscow")
+
+
+def get_location(context, default_key="home"):
+    if not context.args:
+        if default_key == "home":
+            chat_id = getattr(context, "_chat_id", None)
+
+            if chat_id:
+                return get_user_home_location(chat_id)
+
+            return FAVORITE_LOCATIONS["home"]
+
+        return FAVORITE_LOCATIONS[default_key]
+
+    key = context.args[0].lower()
+
+    if key in FAVORITE_LOCATIONS:
+        return FAVORITE_LOCATIONS[key]
+
+    return get_city_coordinates(" ".join(context.args))
 
 
 
@@ -1507,7 +1548,8 @@ def build_danger_message(location, events, auto=False):
 
 
 async def subscribe_danger_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location_key = get_home_location_key()
+    chat_id = update.effective_chat.id
+    location_key = "home"
 
     if context.args:
         requested_key = context.args[0].lower()
@@ -1524,11 +1566,15 @@ async def subscribe_danger_alerts(update: Update, context: ContextTypes.DEFAULT_
 
         location_key = requested_key
 
-    add_danger_subscriber(update.effective_chat.id, location_key)
-    location = get_location_by_key(location_key)
+    add_danger_subscriber(chat_id, location_key)
+
+    if location_key == "home":
+        location = get_user_home_location(chat_id)
+    else:
+        location = get_location_by_key(location_key)
 
     await update.message.reply_text(
-        f"✅ Авто-алерты опасной погоды включены.\n\n"
+        f"✅ Авто-алерты опасной погоды включены только для тебя.\n\n"
         f"📍 Локация: {location['name']}\n"
         f"Проверка: каждый час\n"
         f"Период анализа: ближайшие 48 часов\n\n"
@@ -1564,8 +1610,12 @@ async def danger_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    location_key = subscription.get("location_key", get_home_location_key())
-    location = get_location_by_key(location_key)
+    location_key = subscription.get("location_key", "home")
+
+    if location_key == "home":
+        location = get_user_home_location(chat_id)
+    else:
+        location = get_location_by_key(location_key)
 
     await update.message.reply_text(
         f"🚨 Danger alerts: ✅ включены\n\n"
@@ -1585,9 +1635,17 @@ async def check_danger_alerts_schedule(context: ContextTypes.DEFAULT_TYPE):
     updated_subscribers = []
 
     for subscriber in subscribers:
-        chat_id = subscriber.get("chat_id")
-        location_key = subscriber.get("location_key", get_home_location_key())
-        location = get_location_by_key(location_key)
+        chat_id = str(subscriber.get("chat_id"))
+        location_key = subscriber.get("location_key", "home")
+
+        if location_key == "home":
+            location = get_user_home_location(chat_id)
+        else:
+            location = get_location_by_key(location_key)
+
+        if not location:
+            updated_subscribers.append(subscriber)
+            continue
 
         try:
             events = detect_danger_events(location, hours_limit=48)
@@ -1625,164 +1683,6 @@ async def check_danger_alerts_schedule(context: ContextTypes.DEFAULT_TYPE):
     save_danger_subscribers(updated_subscribers)
 
 
-async def danger_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context)
-
-    if not location:
-        await update.message.reply_text("Локация не найдена 😢")
-        return
-
-    try:
-        events = detect_danger_events(location, hours_limit=48)
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка danger alerts: {e}")
-        return
-
-    if not events:
-        await update.message.reply_text(
-            f"🟢 Опасных погодных событий не найдено\n\n"
-            f"📍 {location['name']}, {location['country']}\n"
-            f"Период: ближайшие 48 часов\n\n"
-            f"Дождь, сильный ветер, гроза, снег, град и туман сейчас не выглядят критично."
-        )
-        return
-
-    ai_prompt = f"""
-Локация:
-{location['name']}
-
-Опасные погодные события на ближайшие 48 часов:
-{events}
-
-Сделай краткое предупреждение:
-- что самое важное
-- когда ожидается риск
-- что делать человеку
-- брать ли зонт/дождевик
-- опасен ли ветер
-"""
-
-    ai_summary = get_ai_summary(ai_prompt)
-
-    message = (
-        f"⚠️ Danger Weather Alerts\n"
-        f"📍 {location['name']}, {location['country']}\n"
-        f"Период: ближайшие 48 часов\n\n"
-    )
-
-    # Ограничим вывод, чтобы Telegram не перегрузить.
-    for event in events[:12]:
-        message += f"{event['text']}\n"
-
-    if len(events) > 12:
-        message += f"\n...и ещё {len(events) - 12} событий.\n"
-
-    message += (
-        f"\n🤖 AI-вывод:\n"
-        f"{ai_summary}"
-    )
-
-    await update.message.reply_text(message)
-
-
-async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context)
-
-    if not location:
-        await update.message.reply_text("Локация не найдена 😢")
-        return
-
-    today_date = datetime.now().strftime("%Y-%m-%d")
-    tomorrow_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-
-    try:
-        today_parts_data = get_hourly_parts_sources(location, today_date)
-        tomorrow_parts_data = get_hourly_parts_sources(location, tomorrow_date)
-
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка получения alerts: {e}")
-        return
-
-    today_alerts = build_alerts_from_parts(today_parts_data)
-    tomorrow_alerts = build_alerts_from_parts(tomorrow_parts_data)
-
-    today_best_key, today_best_score = get_best_part(today_parts_data)
-    tomorrow_best_key, tomorrow_best_score = get_best_part(tomorrow_parts_data)
-
-    today_best = today_parts_data[today_best_key]
-    tomorrow_best = tomorrow_parts_data[tomorrow_best_key]
-
-    ai_prompt = f"""
-Локация:
-{location['name']}
-
-Сегодня по частям дня:
-{today_parts_data}
-
-Завтра по частям дня:
-{tomorrow_parts_data}
-
-Предупреждения сегодня:
-{today_alerts}
-
-Предупреждения завтра:
-{tomorrow_alerts}
-
-Лучшее окно сегодня:
-{today_best}
-
-Лучшее окно завтра:
-{tomorrow_best}
-
-Дай короткий вывод:
-- главные риски
-- лучшее окно сегодня
-- лучшее окно завтра
-- брать ли зонт
-- стоит ли переносить планы
-"""
-
-    ai_summary = get_ai_summary(ai_prompt)
-
-    message = (
-        f"⚠️ Smart Weather Alerts\n"
-        f"📍 {location['name']}, {location['country']}\n\n"
-
-        f"📅 Сегодня {today_date}\n"
-    )
-
-    for alert in today_alerts:
-        message += f"{alert}\n"
-
-    message += (
-        f"\n✅ Лучшее окно сегодня:\n"
-        f"{today_best.get('title')} — "
-        f"~{today_best.get('temp')}°C, "
-        f"дождь ~{today_best.get('rain')}%, "
-        f"ветер до ~{today_best.get('wind')} км/ч\n"
-        f"Score: {today_best_score}\n\n"
-
-        f"📅 Завтра {tomorrow_date}\n"
-    )
-
-    for alert in tomorrow_alerts:
-        message += f"{alert}\n"
-
-    message += (
-        f"\n✅ Лучшее окно завтра:\n"
-        f"{tomorrow_best.get('title')} — "
-        f"~{tomorrow_best.get('temp')}°C, "
-        f"дождь ~{tomorrow_best.get('rain')}%, "
-        f"ветер до ~{tomorrow_best.get('wind')} км/ч\n"
-        f"Score: {tomorrow_best_score}\n\n"
-
-        f"🤖 AI-вывод:\n"
-        f"{ai_summary}"
-    )
-
-    await update.message.reply_text(message)
-
-
 async def morning(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # По умолчанию утренний брифинг делаем по дому.
     # Но можно вызвать /morning kalyazin или /morning khvoynaya.
@@ -1802,6 +1702,7 @@ async def morning(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def subscribe_morning(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
     location_key = "home"
 
     if context.args:
@@ -1819,14 +1720,19 @@ async def subscribe_morning(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         location_key = requested_key
 
-    add_morning_subscriber(update.effective_chat.id, location_key)
+    add_morning_subscriber(chat_id, location_key)
 
-    location = get_location_by_key(location_key)
+    if location_key == "home":
+        location = get_user_home_location(chat_id)
+    else:
+        location = get_location_by_key(location_key)
+
+    morning_time = get_user_morning_time(chat_id)
 
     await update.message.reply_text(
-        f"✅ Утренний прогноз включён.\n"
+        f"✅ Утренний прогноз включён только для тебя.\n"
         f"Локация: {location['name']}\n"
-        f"Время: каждый день в 08:00 по Москве.\n\n"
+        f"Время: каждый день в {morning_time} по Москве.\n\n"
         f"Проверить вручную можно командой:\n"
         f"/morning {location_key}"
     )
@@ -2720,9 +2626,11 @@ def is_valid_time_string(value):
 
 
 async def set_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+
     if not context.args:
-        current_key = get_home_location_key()
-        current_location = get_home_location()
+        current_key = get_user_home_location_key(chat_id)
+        current_location = get_user_home_location(chat_id)
 
         await update.message.reply_text(
             f"🏠 Текущая домашняя локация: {current_location['name']}\n\n"
@@ -2733,7 +2641,8 @@ async def set_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"/set_home kalyazin\n"
             f"/set_home khvoynaya\n"
             f"/set_home lyubytino\n\n"
-            f"Сейчас ключ: {current_key}"
+            f"Сейчас ключ: {current_key}\n\n"
+            f"Важно: это меняет home только для тебя."
         )
         return
 
@@ -2747,34 +2656,29 @@ async def set_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    settings = load_settings()
-    settings["home_location_key"] = location_key
-    save_settings(settings)
+    update_user_setting(chat_id, "home_location_key", location_key)
 
     location = FAVORITE_LOCATIONS[location_key]
 
     await update.message.reply_text(
-        f"✅ Домашняя локация обновлена.\n\n"
-        f"🏠 Теперь по умолчанию: {location['name']}, {location['country']}\n\n"
-        f"Команды без указания города теперь будут использовать эту точку:\n"
-        f"/weather\n"
-        f"/morning\n"
-        f"/today_parts\n"
-        f"/tomorrow\n"
-        f"/weekend\n"
-        f"/week"
+        f"✅ Домашняя локация обновлена только для тебя.\n\n"
+        f"🏠 Теперь твой home: {location['name']}, {location['country']}\n\n"
+        f"У других пользователей home не изменится."
     )
 
 
 async def set_morning_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+
     if not context.args:
-        settings = load_settings()
+        user_settings = get_user_settings(chat_id)
 
         await update.message.reply_text(
-            f"🕒 Текущее время утреннего прогноза: {settings.get('morning_time', '08:00')}\n\n"
+            f"🕒 Текущее время твоего утреннего прогноза: {user_settings.get('morning_time', '08:00')}\n\n"
             f"Чтобы изменить, используй формат HH:MM:\n"
             f"/set_morning_time 07:30\n"
-            f"/set_morning_time 09:00"
+            f"/set_morning_time 09:00\n\n"
+            f"Важно: это меняет время только для тебя."
         )
         return
 
@@ -2788,13 +2692,11 @@ async def set_morning_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    settings = load_settings()
-    settings["morning_time"] = new_time
-    save_settings(settings)
+    update_user_setting(chat_id, "morning_time", new_time)
 
     await update.message.reply_text(
-        f"✅ Время утреннего прогноза обновлено.\n\n"
-        f"Теперь бот будет присылать прогноз каждый день в {new_time} по Москве.\n\n"
+        f"✅ Время утреннего прогноза обновлено только для тебя.\n\n"
+        f"Теперь бот будет присылать тебе прогноз каждый день в {new_time} по Москве.\n\n"
         f"Проверить настройки:\n"
         f"/status"
     )
@@ -2961,19 +2863,19 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+
     subscribers = load_morning_subscribers()
     history_items = load_history()
     scores_data = load_scores()
     rain_scores_data = load_rain_scores()
-    settings = load_settings()
-    home_location = get_home_location()
-
-    current_chat_id = str(update.effective_chat.id)
+    user_settings = get_user_settings(chat_id)
+    home_location = get_user_home_location(chat_id)
 
     current_subscription = None
 
     for subscriber in subscribers:
-        if str(subscriber.get("chat_id")) == current_chat_id:
+        if str(subscriber.get("chat_id")) == chat_id:
             current_subscription = subscriber
             break
 
@@ -2992,12 +2894,16 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if current_subscription:
         location_key = current_subscription.get("location_key", "home")
-        location = get_location_by_key(location_key)
+
+        if location_key == "home":
+            location = get_user_home_location(chat_id)
+        else:
+            location = get_location_by_key(location_key)
 
         morning_status = (
             f"✅ Включен\n"
             f"📍 Локация: {location['name']}\n"
-            f"🕒 Время: {settings.get('morning_time', '08:00')} {settings.get('timezone', 'Europe/Moscow')}"
+            f"🕒 Время: {user_settings.get('morning_time', '08:00')} {user_settings.get('timezone', 'Europe/Moscow')}"
         )
     else:
         morning_status = "❌ Отключен"
@@ -3007,7 +2913,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📁 model_scores.json\n"
         f"📁 rain_scores.json\n"
         f"📁 morning_subscribers.json\n"
-        f"📁 settings.json"
+        f"📁 settings.json\n"
+        f"📁 user_settings.json"
     )
 
     if adaptive_enabled:
@@ -3023,8 +2930,10 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = (
         f"🧠 Статус AI Weather Assistant\n\n"
 
-        f"🏠 Home location:\n"
-        f"{home_location['name']} ({settings.get('home_location_key', 'home')})\n\n"
+        f"👤 User settings:\n"
+        f"Chat ID: {chat_id}\n"
+        f"🏠 Home: {home_location['name']} ({user_settings.get('home_location_key', 'home')})\n"
+        f"🕒 Morning time: {user_settings.get('morning_time', '08:00')} {user_settings.get('timezone', 'Europe/Moscow')}\n\n"
 
         f"🌅 Morning alerts:\n"
         f"{morning_status}\n\n"
@@ -3043,41 +2952,48 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{files_status}\n\n"
 
         f"🖥 Режим работы:\n"
-        f"Local autonomous mode"
+        f"Cloud/Render autonomous mode"
     )
 
     await update.message.reply_text(message)
 
 
 async def check_morning_schedule(context: ContextTypes.DEFAULT_TYPE):
-    settings = load_settings()
-
-    timezone_name = settings.get("timezone", "Europe/Moscow")
-    morning_time = settings.get("morning_time", "08:00")
-    last_sent_date = settings.get("last_morning_sent_date", "")
-
-    if not is_valid_time_string(morning_time):
-        return
-
-    now = datetime.now(ZoneInfo(timezone_name))
-    current_time = now.strftime("%H:%M")
-    current_date = now.strftime("%Y-%m-%d")
-
-    if current_time != morning_time:
-        return
-
-    if last_sent_date == current_date:
-        return
-
     subscribers = load_morning_subscribers()
 
     if not subscribers:
         return
 
     for subscriber in subscribers:
-        chat_id = subscriber.get("chat_id")
-        location_key = subscriber.get("location_key", get_home_location_key())
-        location = get_location_by_key(location_key)
+        chat_id = str(subscriber.get("chat_id"))
+        user_settings = get_user_settings(chat_id)
+
+        timezone_name = user_settings.get("timezone", "Europe/Moscow")
+        morning_time = user_settings.get("morning_time", "08:00")
+        last_sent_date = user_settings.get("last_morning_sent_date", "")
+
+        if not is_valid_time_string(morning_time):
+            continue
+
+        now = datetime.now(ZoneInfo(timezone_name))
+        current_time = now.strftime("%H:%M")
+        current_date = now.strftime("%Y-%m-%d")
+
+        if current_time != morning_time:
+            continue
+
+        if last_sent_date == current_date:
+            continue
+
+        location_key = subscriber.get("location_key", "home")
+
+        if location_key == "home":
+            location = get_user_home_location(chat_id)
+        else:
+            location = get_location_by_key(location_key)
+
+        if not location:
+            continue
 
         try:
             message = build_morning_message_for_location(location)
@@ -3085,15 +3001,13 @@ async def check_morning_schedule(context: ContextTypes.DEFAULT_TYPE):
                 chat_id=int(chat_id),
                 text=message
             )
+            update_user_setting(chat_id, "last_morning_sent_date", current_date)
 
         except Exception as e:
             await context.bot.send_message(
                 chat_id=int(chat_id),
                 text=f"Ошибка утреннего прогноза: {e}"
             )
-
-    settings["last_morning_sent_date"] = current_date
-    save_settings(settings)
 
 
 async def favorite_current(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str):
