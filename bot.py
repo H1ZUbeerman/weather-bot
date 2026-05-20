@@ -3026,7 +3026,7 @@ async def setup_bot_commands(app):
         BotCommand("tomorrow_parts", "Завтра по частям дня"),
         BotCommand("weekend_parts", "Выходные по частям дня"),
         BotCommand("week_parts", "Неделя по частям дня"),
-        BotCommand("alerts", "Погодные alerts"),
+        # BotCommand("alerts", "Погодные alerts"),
         BotCommand("danger_alerts", "Опасные погодные явления"),
         BotCommand("subscribe_danger_alerts", "Подписка на danger alerts"),
         BotCommand("danger_status", "Статус danger alerts"),
@@ -3051,7 +3051,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("weather", weather))
-    app.add_handler(CommandHandler("alerts", alerts))
+    # app.add_handler(CommandHandler("alerts", alerts))
     app.add_handler(CommandHandler("danger_alerts", danger_alerts))
     app.add_handler(CommandHandler("subscribe_danger_alerts", subscribe_danger_alerts))
     app.add_handler(CommandHandler("unsubscribe_danger_alerts", unsubscribe_danger_alerts))
