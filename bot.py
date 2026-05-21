@@ -24,6 +24,7 @@ WEATHERAPI_KEY = get_env_value("WEATHERAPI_KEY")
 VISUALCROSSING_API_KEY = get_env_value("VISUALCROSSING_API_KEY")
 METEOSOURCE_API_KEY = get_env_value("METEOSOURCE_API_KEY")
 OPENAI_API_KEY = get_env_value("OPENAI_API_KEY")
+DATA_DIR = Path(get_env_value("DATA_DIR") or ".")
 
 HISTORY_FILE = "weather_history.json"
 SCORES_FILE = "model_scores.json"
@@ -58,17 +59,36 @@ PROFILE_OPTIONS = {
     },
 }
 
+
+def get_data_path(filename):
+    path = Path(filename)
+
+    if path.is_absolute():
+        return path
+
+    return DATA_DIR / path
+
+
+def ensure_data_dir():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
 def load_user_settings():
-    if not os.path.exists(USER_SETTINGS_FILE):
+    path = get_data_path(USER_SETTINGS_FILE)
+
+    if not path.exists():
         return {}
+
     try:
-        with open(USER_SETTINGS_FILE, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except:
         return {}
 
 def save_user_settings(data):
-    with open(USER_SETTINGS_FILE, "w", encoding="utf-8") as f:
+    ensure_data_dir()
+
+    with open(get_data_path(USER_SETTINGS_FILE), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def get_user_settings(chat_id):
@@ -202,10 +222,12 @@ DAY_PARTS = {
 
 
 def load_json_file(filename, default):
-    path = Path(filename)
+    path = get_data_path(filename)
+
     if not path.exists():
         return default
-    with open(filename, "r", encoding="utf-8") as f:
+
+    with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -222,7 +244,9 @@ def count_json_items(filename):
 
 
 def save_json_file(filename, data):
-    with open(filename, "w", encoding="utf-8") as f:
+    ensure_data_dir()
+
+    with open(get_data_path(filename), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
@@ -1974,7 +1998,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"☁️ Режим работы:\n"
         f"✅ Cloud / Render\n"
         f"✅ Telegram polling active\n"
-        f"✅ Python locked: 3.11.11\n\n"
+        f"✅ Python locked: 3.11.11\n"
+        f"💾 DATA_DIR: {DATA_DIR}\n\n"
 
         f"🏠 Твой home:\n"
         f"{home_location['name']} ({home_key})\n\n"
