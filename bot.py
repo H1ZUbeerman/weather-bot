@@ -1612,6 +1612,46 @@ async def favorite_current(update: Update, context: ContextTypes.DEFAULT_TYPE, k
     await weather(update, context)
 
 
+
+async def set_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+
+    if not context.args:
+        user_settings = get_user_settings(chat_id)
+        current_key = user_settings.get("home_location_key", "home")
+        current_location = get_location_by_key(current_key) or FAVORITE_LOCATIONS["home"]
+
+        available_locations = "\n".join(
+            [f"/set_home {key}" for key in FAVORITE_LOCATIONS.keys()]
+        )
+
+        await update.message.reply_text(
+            f"🏠 Текущая домашняя локация: {current_location['name']}\n\n"
+            f"Чтобы изменить, используй:\n"
+            f"{available_locations}\n\n"
+            f"Сейчас ключ: {current_key}\n\n"
+            f"Важно: это меняет home только для тебя."
+        )
+        return
+
+    location_key = context.args[0].lower()
+
+    if location_key not in FAVORITE_LOCATIONS:
+        await update.message.reply_text(
+            "Такой избранной локации нет 😢\n\n"
+            "Напиши /set_home, чтобы увидеть доступные варианты."
+        )
+        return
+
+    update_user_setting(chat_id, "home_location_key", location_key)
+    location = FAVORITE_LOCATIONS[location_key]
+
+    await update.message.reply_text(
+        f"✅ Домашняя локация обновлена только для тебя.\n\n"
+        f"🏠 Теперь твой home: {location['name']}, {location['country']}"
+    )
+
+
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
