@@ -4,6 +4,7 @@ import requests
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import Counter, defaultdict
+from telegram.ext import CommandHandler
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -23,6 +24,40 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 HISTORY_FILE = "weather_history.json"
 SCORES_FILE = "model_scores.json"
 RAIN_SCORES_FILE = "rain_scores.json"
+
+
+USER_SETTINGS_FILE = "settings.json"
+
+def load_user_settings():
+    if not os.path.exists(USER_SETTINGS_FILE):
+        return {}
+    try:
+        with open(USER_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_user_settings(data):
+    with open(USER_SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def get_user_settings(chat_id):
+    data = load_user_settings()
+    return data.get(str(chat_id), {})
+
+def update_user_setting(chat_id, key, value):
+    data = load_user_settings()
+    chat_key = str(chat_id)
+
+    if chat_key not in data:
+        data[chat_key] = {}
+
+    data[chat_key][key] = value
+    save_user_settings(data)
+
+def get_location_by_key(location_key):
+    return FAVORITE_LOCATIONS.get(location_key, FAVORITE_LOCATIONS["home"])
+
 
 FAVORITE_LOCATIONS = {
     "home": {"latitude": 55.904068, "longitude": 37.640018, "name": "Дом", "country": "Россия", "region_type": "moscow"},
@@ -1586,6 +1621,7 @@ def main():
     app.add_handler(CommandHandler("today_parts", today_parts))
     app.add_handler(CommandHandler("tomorrow_parts", tomorrow_parts))
     app.add_handler(CommandHandler("tomorrow", tomorrow))
+    app.add_handler(CommandHandler("set_home", set_home))
     app.add_handler(CommandHandler("weekend", weekend))
     app.add_handler(CommandHandler("history", history))
     app.add_handler(CommandHandler("analyze", analyze))
@@ -1603,6 +1639,7 @@ def main():
     app.add_handler(CommandHandler("lyubytino", lambda update, context: favorite_current(update, context, "lyubytino")))
 
     print("Бот запущен...")
+    app.add_handler(CommandHandler("set_home", set_home))
     app.run_polling()
 
 
