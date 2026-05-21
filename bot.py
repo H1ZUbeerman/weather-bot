@@ -593,16 +593,19 @@ def save_learning_forecasts(items):
     save_json_file(LEARNING_FILE, items)
 
 
-def save_auto_learning_forecast(location):
+def save_auto_learning_forecast(location, location_key=None):
     current = get_current_sources(location)
     c = build_consensus(location, current)
 
+    if location_key is None:
+        location_key = get_home_location_key()
+
     item = {
-        "id": datetime.now().strftime("%Y%m%d%H%M%S"),
+        "id": f"{location_key}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "date": datetime.now().strftime("%Y-%m-%d"),
         "location": location["name"],
-        "location_key": get_home_location_key(),
+        "location_key": location_key,
         "forecast": {
             "region_type": location["region_type"],
             "temperatures": {**c["temp_values"], "consensus": c["avg_temp"]},
@@ -632,8 +635,25 @@ def save_auto_learning_forecast(location):
     return item
 
 
+def save_auto_learning_forecasts_for_all_locations():
+    created_items = []
+
+    for location_key, location in FAVORITE_LOCATIONS.items():
+        try:
+            item = save_auto_learning_forecast(location, location_key)
+            created_items.append(item)
+        except Exception:
+            continue
+
+    return created_items
+
+
 def verify_auto_learning_forecast(item):
-    location = get_location_by_name(item["location"])
+    location_key = item.get("location_key")
+    location = get_location_by_key(location_key) if location_key else None
+
+    if not location:
+        location = get_location_by_name(item["location"])
 
     if not location:
         raise ValueError(f"Не найдена локация: {item['location']}")
@@ -729,7 +749,8 @@ async def learning_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏳ Ожидают проверки: {pending}\n\n"
         f"🕗 Последний авто-прогноз: {last_forecast_date or 'нет данных'}\n"
         f"🕗 Последняя авто-проверка: {last_verify_date or 'нет данных'}\n\n"
-        f"🏠 Home location: {get_home_location()['name']}\n\n"
+        f"🏠 Home location: {get_home_location()['name']}\n"
+        f"📍 Auto-learning locations: {len(FAVORITE_LOCATIONS)}\n\n"
         f"Файлы:\n"
         f"📁 learning_forecasts.json\n"
         f"📁 model_scores.json\n"
@@ -809,19 +830,17 @@ async def check_learning_schedule(context: ContextTypes.DEFAULT_TYPE):
     current_time = now.strftime("%H:%M")
     current_date = now.strftime("%Y-%m-%d")
 
-    # Утром сохраняем прогноз.
+    # Утром сохраняем прогнозы по всем избранным локациям.
     if current_time == "08:00" and settings.get("last_learning_forecast_date") != current_date:
-        location = get_home_location()
-
         try:
-            save_auto_learning_forecast(location)
+            save_auto_learning_forecasts_for_all_locations()
             settings["last_learning_forecast_date"] = current_date
             save_settings(settings)
 
         except Exception:
             return
 
-    # Вечером проверяем последний непроверенный прогноз за сегодня.
+    # Вечером проверяем все непроверенные прогнозы за сегодня.
     if current_time == "20:00" and settings.get("last_learning_verify_date") != current_date:
         items = load_learning_forecasts()
         pending_items = [
@@ -832,22 +851,72 @@ async def check_learning_schedule(context: ContextTypes.DEFAULT_TYPE):
         if not pending_items:
             return
 
-        item = pending_items[-1]
+        changed = False
 
+        for item in pending_items:
+            try:
+                verified_item = verify_auto_learning_forecast(item)
+
+                for index, existing_item in enumerate(items):
+                    if existing_item.get("id") == verified_item.get("id"):
+                        items[index] = verified_item
+                        changed = True
+                        break
+
+            except Exception:
+                continue
+
+        if changed:
+            save_learning_forecasts(items)
+
+        settings["last_learning_verify_date"] = current_date
+        save_settings(settings)
+
+
+async def learning_forecast_all_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        items = save_auto_learning_forecasts_for_all_locations()
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка learning forecast all: {e}")
+        return
+
+    await update.message.reply_text(
+        f"✅ Learning forecast сохранён по всем избранным локациям.\n\n"
+        f"Сохранено: {len(items)}\n"
+        f"Локации: {', '.join([item['location_key'] for item in items])}"
+    )
+
+
+async def learning_verify_all_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    items = load_learning_forecasts()
+    pending_items = [item for item in items if not item.get("verified")]
+
+    if not pending_items:
+        await update.message.reply_text("Нет авто-прогнозов, ожидающих проверки.")
+        return
+
+    verified_count = 0
+
+    for item in pending_items:
         try:
             verified_item = verify_auto_learning_forecast(item)
 
             for index, existing_item in enumerate(items):
                 if existing_item.get("id") == verified_item.get("id"):
                     items[index] = verified_item
+                    verified_count += 1
                     break
 
-            save_learning_forecasts(items)
-            settings["last_learning_verify_date"] = current_date
-            save_settings(settings)
-
         except Exception:
-            return
+            continue
+
+    save_learning_forecasts(items)
+
+    await update.message.reply_text(
+        f"✅ Learning verify выполнен по всем доступным непроверенным прогнозам.\n\n"
+        f"Проверено: {verified_count}\n"
+        f"Scores обновлены."
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3206,6 +3275,8 @@ def main():
     app.add_handler(CommandHandler("dashboard", dashboard))
     app.add_handler(CommandHandler("learning_forecast_now", run_learning_forecast_now))
     app.add_handler(CommandHandler("learning_verify_now", run_learning_verify_now))
+    app.add_handler(CommandHandler("learning_forecast_all_now", learning_forecast_all_now))
+    app.add_handler(CommandHandler("learning_verify_all_now", learning_verify_all_now))
     app.add_handler(CommandHandler("set_home", set_home))
     app.add_handler(CommandHandler("set_morning_time", set_morning_time))
 
