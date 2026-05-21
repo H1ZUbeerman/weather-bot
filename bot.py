@@ -3,8 +3,8 @@ import json
 import requests
 from pathlib import Path
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from collections import Counter, defaultdict
-from telegram.ext import CommandHandler
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -34,6 +34,7 @@ USER_SETTINGS_FILE = "settings.json"
 MORNING_SUBSCRIBERS_FILE = "morning_subscribers.json"
 LEARNING_FILE = "learning_forecasts.json"
 DANGER_SUBSCRIBERS_FILE = "danger_subscribers.json"
+DEFAULT_TIMEZONE = "Europe/Moscow"
 
 def load_user_settings():
     if not os.path.exists(USER_SETTINGS_FILE):
@@ -154,6 +155,46 @@ def count_json_items(filename):
 def save_json_file(filename, data):
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_morning_subscribers():
+    subscribers = load_json_file(MORNING_SUBSCRIBERS_FILE, [])
+    return subscribers if isinstance(subscribers, list) else []
+
+
+def save_morning_subscribers(subscribers):
+    save_json_file(MORNING_SUBSCRIBERS_FILE, subscribers)
+
+
+def find_morning_subscriber(subscribers, chat_id):
+    chat_key = str(chat_id)
+
+    for subscriber in subscribers:
+        if str(subscriber.get("chat_id")) == chat_key:
+            return subscriber
+
+    return None
+
+
+def is_valid_time(value):
+    if len(value) != 5 or value[2] != ":":
+        return False
+
+    try:
+        datetime.strptime(value, "%H:%M")
+        return True
+    except ValueError:
+        return False
+
+
+def resolve_subscriber_location(subscriber):
+    chat_id = subscriber.get("chat_id")
+    location_key = subscriber.get("location_key", "home")
+
+    if location_key == "home":
+        return get_home_location_for_chat(chat_id)
+
+    return get_location_by_key(location_key)
 
 
 def weighted_average(values, weights):
@@ -811,6 +852,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/scores\n"
         "/rain_scores\n"
         "/adaptive\n"
+        "/morning_on\n"
+        "/morning_off\n"
+        "/morning_time\n"
+        "/morning_now\n"
         "/status\n\n"
         "Локации:\n"
         "/home\n"
@@ -1020,6 +1065,67 @@ async def tomorrow_parts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(message)
+
+
+def build_morning_briefing(location):
+    current = get_current_sources(location)
+    c = build_consensus(location, current)
+    parts = get_hourly_parts_sources(location)
+
+    ai_prompt = f"""
+Локация:
+{location['name']}
+
+Утренний погодный брифинг.
+
+Сейчас:
+Температура {c['avg_temp']}
+Ветер {c['avg_wind']}
+Осадки {c['avg_rain']}
+Уверенность температуры: {c['temp_confidence']}
+Уверенность осадков: {c['rain_confidence']}
+
+Сегодня по частям дня:
+{parts}
+
+Дай короткий практичный вывод:
+- как одеться утром и днем
+- брать ли зонт
+- когда лучше выходить
+- есть ли риск дождя вечером
+- стоит ли планировать прогулку или дела на улице
+"""
+
+    ai_summary = get_ai_summary(ai_prompt)
+
+    message = (
+        f"🌅 Утренний брифинг\n"
+        f"📍 {location['name']}, {location['country']}\n\n"
+
+        f"📌 Сейчас:\n"
+        f"🌡 ~{c['avg_temp']}°C\n"
+        f"💨 ~{c['avg_wind']} км/ч\n"
+        f"☔ ~{c['avg_rain']}\n"
+        f"✅ Temp: {c['temp_confidence']}, Rain: {c['rain_confidence']}\n\n"
+
+        f"🕒 Сегодня:\n"
+    )
+
+    for key in ["morning", "day", "evening", "night"]:
+        part = parts.get(key, {})
+        message += (
+            f"{part.get('title', key)}: "
+            f"~{part.get('temp')}°C, "
+            f"дождь ~{part.get('rain')}%, "
+            f"ветер до ~{part.get('wind')} км/ч\n"
+        )
+
+    message += (
+        f"\n🤖 AI-вывод:\n"
+        f"{ai_summary}"
+    )
+
+    return message
 
 
 async def tomorrow(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1756,6 +1862,162 @@ async def set_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def morning_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    location_key = context.args[0].lower() if context.args else "home"
+
+    if location_key not in FAVORITE_LOCATIONS:
+        available_locations = build_location_options(command_prefix="/morning_on")
+
+        await update.message.reply_text(
+            f"Такой локации нет 😢\n\n"
+            f"Доступные варианты:\n"
+            f"{available_locations}"
+        )
+        return
+
+    user_settings = get_user_settings(chat_id)
+    morning_time = user_settings.get("morning_time", "08:00")
+    subscribers = load_morning_subscribers()
+    subscriber = find_morning_subscriber(subscribers, chat_id)
+
+    if subscriber:
+        subscriber["location_key"] = location_key
+        subscriber["morning_time"] = morning_time
+    else:
+        subscribers.append({
+            "chat_id": str(chat_id),
+            "location_key": location_key,
+            "morning_time": morning_time,
+            "created_at": datetime.now(ZoneInfo(DEFAULT_TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S"),
+            "last_sent_date": "",
+        })
+
+    save_morning_subscribers(subscribers)
+
+    location_text = "твой home" if location_key == "home" else FAVORITE_LOCATIONS[location_key]["name"]
+
+    await update.message.reply_text(
+        f"✅ Утренний брифинг включён.\n\n"
+        f"📍 Локация: {location_text}\n"
+        f"🕗 Время: {morning_time} по Москве\n\n"
+        f"Изменить время: /morning_time 08:30\n"
+        f"Проверить сейчас: /morning_now"
+    )
+
+
+async def morning_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    subscribers = load_morning_subscribers()
+    updated_subscribers = [
+        subscriber
+        for subscriber in subscribers
+        if str(subscriber.get("chat_id")) != str(chat_id)
+    ]
+
+    save_morning_subscribers(updated_subscribers)
+
+    await update.message.reply_text("✅ Утренний брифинг выключен.")
+
+
+async def morning_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+
+    if not context.args:
+        user_settings = get_user_settings(chat_id)
+        current_time = user_settings.get("morning_time", "08:00")
+
+        await update.message.reply_text(
+            f"🕗 Текущее время утреннего брифинга: {current_time} по Москве\n\n"
+            f"Изменить:\n"
+            f"/morning_time 08:30"
+        )
+        return
+
+    new_time = context.args[0]
+
+    if not is_valid_time(new_time):
+        await update.message.reply_text(
+            "Время нужно указать в формате HH:MM.\n\n"
+            "Например:\n"
+            "/morning_time 08:30"
+        )
+        return
+
+    update_user_setting(chat_id, "morning_time", new_time)
+
+    subscribers = load_morning_subscribers()
+    subscriber = find_morning_subscriber(subscribers, chat_id)
+
+    if subscriber:
+        subscriber["morning_time"] = new_time
+        save_morning_subscribers(subscribers)
+
+    await update.message.reply_text(
+        f"✅ Время утреннего брифинга обновлено: {new_time} по Москве."
+    )
+
+
+async def morning_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    subscribers = load_morning_subscribers()
+    subscriber = find_morning_subscriber(subscribers, chat_id)
+
+    if subscriber:
+        location = resolve_subscriber_location(subscriber)
+    else:
+        location = get_home_location_for_chat(chat_id)
+
+    try:
+        message = build_morning_briefing(location)
+    except Exception as e:
+        await update.message.reply_text(f"Не смог собрать утренний брифинг: {e}")
+        return
+
+    await update.message.reply_text(message)
+
+
+async def check_morning_alerts(context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now(ZoneInfo(DEFAULT_TIMEZONE))
+    today = now.strftime("%Y-%m-%d")
+    current_minutes = now.hour * 60 + now.minute
+    subscribers = load_morning_subscribers()
+    changed = False
+
+    for subscriber in subscribers:
+        try:
+            morning_time_value = subscriber.get("morning_time", "08:00")
+
+            if not is_valid_time(morning_time_value):
+                morning_time_value = "08:00"
+
+            target_time = datetime.strptime(morning_time_value, "%H:%M")
+            target_minutes = target_time.hour * 60 + target_time.minute
+
+            if subscriber.get("last_sent_date") == today:
+                continue
+
+            if not 0 <= current_minutes - target_minutes < 3:
+                continue
+
+            location = resolve_subscriber_location(subscriber)
+            message = build_morning_briefing(location)
+
+            await context.bot.send_message(
+                chat_id=subscriber["chat_id"],
+                text=message,
+            )
+
+            subscriber["last_sent_date"] = today
+            changed = True
+
+        except Exception as e:
+            print("Morning alert error:", e)
+
+    if changed:
+        save_morning_subscribers(subscribers)
+
+
 def main():
     if not TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
@@ -1770,6 +2032,10 @@ def main():
     app.add_handler(CommandHandler("tomorrow", tomorrow))
     app.add_handler(CommandHandler("set_home", set_home))
     app.add_handler(CommandHandler("locations", locations))
+    app.add_handler(CommandHandler("morning_on", morning_on))
+    app.add_handler(CommandHandler("morning_off", morning_off))
+    app.add_handler(CommandHandler("morning_time", morning_time))
+    app.add_handler(CommandHandler("morning_now", morning_now))
     app.add_handler(CommandHandler("weekend", weekend))
     app.add_handler(CommandHandler("history", history))
     app.add_handler(CommandHandler("analyze", analyze))
@@ -1786,6 +2052,11 @@ def main():
     app.add_handler(CommandHandler("kalyazin", lambda update, context: favorite_current(update, context, "kalyazin")))
     app.add_handler(CommandHandler("khvoynaya", lambda update, context: favorite_current(update, context, "khvoynaya")))
     app.add_handler(CommandHandler("lyubytino", lambda update, context: favorite_current(update, context, "lyubytino")))
+
+    if app.job_queue:
+        app.job_queue.run_repeating(check_morning_alerts, interval=60, first=10)
+    else:
+        print("Job queue недоступен: утренние брифинги по расписанию не запущены")
 
     print("Бот запущен...")
     app.run_polling()
