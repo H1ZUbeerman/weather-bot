@@ -941,13 +941,35 @@ async def tomorrow(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     tomorrow_date = datetime.now() + timedelta(days=1)
+    target_date = tomorrow_date.strftime("%Y-%m-%d")
 
     try:
         sources = get_daily_sources(location, tomorrow_date)
         c = build_consensus(location, sources)
+        parts = get_hourly_parts_sources(location, target_date)
     except Exception as e:
         await update.message.reply_text(f"Ошибка получения прогноза на завтра: {e}")
         return
+
+    best_part_key = None
+    best_part_score = None
+
+    for key in ["morning", "day", "evening", "night"]:
+        part = parts.get(key, {})
+        temp = part.get("temp", 0)
+        rain = part.get("rain", 0)
+        wind = part.get("wind", 0)
+
+        comfort_score = 100
+        comfort_score -= rain * 0.7
+        comfort_score -= max(0, wind - 12) * 1.5
+        comfort_score -= abs(temp - 20) * 1.2
+
+        if best_part_score is None or comfort_score > best_part_score:
+            best_part_score = comfort_score
+            best_part_key = key
+
+    best_part = parts.get(best_part_key, {}) if best_part_key else {}
 
     ai_prompt = f"""
 Локация:
@@ -955,29 +977,24 @@ async def tomorrow(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Прогноз на завтра.
 
-Температуры:
-{c['temp_values']}
-
-Осадки:
-{c['rain_values']}
-
-Ветер:
-{c['wind_values']}
-
-Consensus:
+Общий consensus:
 Температура {c['avg_temp']}
 Осадки {c['avg_rain']}
 Ветер {c['avg_wind']}
+Уверенность температуры: {c['temp_confidence']}
+Уверенность осадков: {c['rain_confidence']}
 
-Уверенность температуры:
-{c['temp_confidence']}
+Завтра по частям дня:
+{parts}
 
-Уверенность осадков:
-{c['rain_confidence']}
+Лучшее окно:
+{best_part}
 
 Дай краткий полезный вывод:
+- когда лучше выходить/ехать
+- в какую часть дня выше риск дождя
 - брать ли зонт
-- как одеваться
+- как одеваться утром/днем/вечером
 - стоит ли ехать на природу
 """
 
@@ -986,19 +1003,8 @@ Consensus:
     message = (
         f"📅 Прогноз на завтра\n"
         f"📍 {location['name']}, {location['country']}\n\n"
-        f"🌡 Температура:\n"
-        f"🌦 Open-Meteo: {c['temp_values']['openmeteo']}°C\n"
-        f"🌤 WeatherAPI: {c['temp_values']['weatherapi']}°C\n"
-        f"🌍 Visual Crossing: {c['temp_values']['visualcrossing']}°C\n"
-        f"🇳🇴 yr.no: {c['temp_values']['yr']}°C\n"
-        f"🌐 Meteosource: {c['temp_values']['meteosource']}°C\n\n"
-        f"☔ Вероятность осадков:\n"
-        f"🌦 Open-Meteo: {c['rain_values']['openmeteo']}%\n"
-        f"🌤 WeatherAPI: {c['rain_values']['weatherapi']}%\n"
-        f"🌍 Visual Crossing: {c['rain_values']['visualcrossing']}%\n"
-        f"🇳🇴 yr.no: {c['rain_values']['yr']}%\n"
-        f"🌐 Meteosource: {c['rain_values']['meteosource']}%\n\n"
-        f"🧠 Consensus:\n"
+
+        f"🧠 Общий consensus:\n"
         f"🌡 ~{c['avg_temp']}°C\n"
         f"💨 ~{c['avg_wind']} км/ч\n"
         f"☔ ~{c['avg_rain']}%\n"
@@ -1007,12 +1013,48 @@ Consensus:
         f"✅ Temp confidence: {c['temp_confidence']}\n"
         f"✅ Rain confidence: {c['rain_confidence']}\n"
         f"⚙️ Режим: {c['weights_mode']}\n\n"
+
+        f"🕒 Завтра по частям дня:\n\n"
+    )
+
+    for key in ["morning", "day", "evening", "night"]:
+        part = parts.get(key, {})
+        title = part.get("title", key)
+        temp = part.get("temp", 0)
+        rain = part.get("rain", 0)
+        wind = part.get("wind", 0)
+
+        if rain >= 70 or wind >= 30:
+            status = "🔴 рискованно"
+        elif rain >= 45 or wind >= 20:
+            status = "🟠 осторожно"
+        elif rain >= 25 or wind >= 15:
+            status = "🟡 нормально, но следить"
+        else:
+            status = "🟢 комфортно"
+
+        message += (
+            f"{title}\n"
+            f"🌡 ~{temp}°C\n"
+            f"☔ Дождь: ~{rain}%\n"
+            f"💨 Ветер: до ~{wind} км/ч\n"
+            f"{status}\n\n"
+        )
+
+    if best_part:
+        message += (
+            f"🏆 Лучшее окно: {best_part.get('title')}\n"
+            f"🌡 ~{best_part.get('temp')}°C, "
+            f"☔ ~{best_part.get('rain')}%, "
+            f"💨 ~{best_part.get('wind')} км/ч\n\n"
+        )
+
+    message += (
         f"🤖 AI-вывод:\n"
         f"{ai_summary}"
     )
 
     await update.message.reply_text(message)
-
 
 async def weekend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     location = get_location(context)
