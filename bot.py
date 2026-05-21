@@ -3018,6 +3018,31 @@ async def favorite_current(update: Update, context: ContextTypes.DEFAULT_TYPE, k
 
 
 
+async def danger_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    location = get_location(context)
+
+    if not location:
+        await update.message.reply_text("Локация не найдена 😢")
+        return
+
+    try:
+        events = detect_danger_events(location, hours_limit=48)
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка danger alerts: {e}")
+        return
+
+    if not events:
+        await update.message.reply_text(
+            f"🟢 Опасных погодных событий не найдено\n\n"
+            f"📍 {location['name']}, {location['country']}\n"
+            f"Период: ближайшие 48 часов"
+        )
+        return
+
+    message = build_danger_message(location, events, auto=False)
+
+    await update.message.reply_text(message)
+
 async def setup_bot_commands(app):
     commands = [
         BotCommand("weather", "Текущая погода"),
@@ -3029,8 +3054,9 @@ async def setup_bot_commands(app):
         BotCommand("weekend_parts", "Выходные по частям дня"),
         BotCommand("week_parts", "Неделя по частям дня"),
         # BotCommand("alerts", "Погодные alerts"),
-        # BotCommand("danger_alerts", "Опасные погодные явления"),
+        BotCommand("danger_alerts", "Опасные погодные явления"),
         BotCommand("subscribe_danger_alerts", "Подписка на danger alerts"),
+        BotCommand("unsubscribe_danger_alerts", "Отключить danger alerts"),
         BotCommand("danger_status", "Статус danger alerts"),
         BotCommand("morning", "Утренний прогноз"),
         BotCommand("subscribe_morning", "Подписка на утренний прогноз"),
@@ -3054,10 +3080,10 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("weather", weather))
     # app.add_handler(CommandHandler("alerts", alerts))
-    # app.add_handler(CommandHandler("danger_alerts", danger_alerts))
-    # app.add_handler(CommandHandler("subscribe_danger_alerts", subscribe_danger_alerts))
-    # app.add_handler(CommandHandler("unsubscribe_danger_alerts", unsubscribe_danger_alerts))
-    # app.add_handler(CommandHandler("danger_status", danger_status))
+    app.add_handler(CommandHandler("danger_alerts", danger_alerts))
+    app.add_handler(CommandHandler("subscribe_danger_alerts", subscribe_danger_alerts))
+    app.add_handler(CommandHandler("unsubscribe_danger_alerts", unsubscribe_danger_alerts))
+    app.add_handler(CommandHandler("danger_status", danger_status))
     app.add_handler(CommandHandler("trip", trip))
     app.add_handler(CommandHandler("baidarka", baidarka))
     app.add_handler(CommandHandler("camping", camping))
