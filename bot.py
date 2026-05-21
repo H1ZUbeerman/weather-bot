@@ -299,6 +299,59 @@ def resolve_subscriber_location(subscriber):
     return get_location_by_key(location_key)
 
 
+def normalize_learning_locations(raw_locations):
+    if not isinstance(raw_locations, list):
+        return []
+
+    locations = []
+
+    for location_key in raw_locations:
+        if location_key in FAVORITE_LOCATIONS and location_key not in locations:
+            locations.append(location_key)
+
+    return locations
+
+
+def get_learning_locations(settings):
+    locations = normalize_learning_locations(settings.get("learning_location_keys", []))
+
+    if locations:
+        return locations
+
+    legacy_location = settings.get("learning_location_key", "home")
+
+    if legacy_location in FAVORITE_LOCATIONS:
+        return [legacy_location]
+
+    return ["home"]
+
+
+def save_learning_locations(chat_id, locations):
+    update_user_setting(chat_id, "learning_location_keys", normalize_learning_locations(locations))
+
+
+def resolve_learning_location(chat_id, location_key):
+    if location_key == "home":
+        return get_home_location_for_chat(chat_id)
+
+    return get_location_by_key(location_key)
+
+
+def build_learning_locations_text(location_keys):
+    if not location_keys:
+        return "не выбраны"
+
+    lines = []
+
+    for location_key in location_keys:
+        location = FAVORITE_LOCATIONS.get(location_key)
+
+        if location:
+            lines.append(f"• {location_key} — {location['name']}")
+
+    return "\n".join(lines) if lines else "не выбраны"
+
+
 def weighted_average(values, weights):
     total = 0
     total_weight = 0
@@ -961,6 +1014,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/learning_on\n"
         "/learning_off\n"
         "/learning_status\n"
+        "/learning_add\n"
+        "/learning_remove\n"
+        "/learning_locations\n"
         "/learning_now\n"
         "/learning_verify_now\n"
         "/profile\n"
@@ -1248,13 +1304,13 @@ def build_morning_briefing(location, chat_id=None):
 
 
 def build_learning_forecast(chat_id, location_key):
-    location = get_home_location_for_chat(chat_id) if location_key == "home" else get_location_by_key(location_key)
+    location = resolve_learning_location(chat_id, location_key)
     current = get_current_sources(location)
     c = build_consensus(location, current)
     now = datetime.now(ZoneInfo(DEFAULT_TIMEZONE))
 
     forecast = {
-        "id": f"{chat_id}-{now.strftime('%Y%m%d%H%M%S')}",
+        "id": f"{chat_id}-{location_key}-{now.strftime('%Y%m%d%H%M%S')}",
         "chat_id": str(chat_id),
         "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
         "date": now.strftime("%Y-%m-%d"),
@@ -1300,7 +1356,8 @@ def save_learning_forecast(chat_id, location_key="home"):
 
 
 def verify_learning_forecast(item):
-    location = get_home_location_for_chat(item.get("chat_id")) if item.get("location_key") == "home" else get_location_by_name(item.get("location"))
+    location_key = item.get("location_key", "home")
+    location = resolve_learning_location(item.get("chat_id"), location_key)
 
     if not location:
         return None
@@ -2334,6 +2391,7 @@ async def learning_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     update_user_setting(chat_id, "learning_enabled", True)
     update_user_setting(chat_id, "learning_location_key", location_key)
+    save_learning_locations(chat_id, [location_key])
 
     location_text = "твой home" if location_key == "home" else FAVORITE_LOCATIONS[location_key]["name"]
 
@@ -2342,6 +2400,8 @@ async def learning_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📍 Локация: {location_text}\n"
         f"🌅 Утром бот сохранит прогноз.\n"
         f"🌙 Вечером бот сравнит его с фактом и обновит веса.\n\n"
+        f"Добавить ещё место: /learning_add moscow_ilya\n"
+        f"Список мест: /learning_locations\n"
         f"Тест сейчас: /learning_now"
     )
 
@@ -2351,6 +2411,91 @@ async def learning_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_user_setting(chat_id, "learning_enabled", False)
 
     await update.message.reply_text("✅ Auto-learning выключен.")
+
+
+async def learning_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+
+    if not context.args:
+        available_locations = build_location_options(command_prefix="/learning_add")
+
+        await update.message.reply_text(
+            f"Какую локацию добавить в auto-learning?\n\n"
+            f"{available_locations}"
+        )
+        return
+
+    location_key = context.args[0].lower()
+
+    if location_key not in FAVORITE_LOCATIONS:
+        available_locations = build_location_options(command_prefix="/learning_add")
+
+        await update.message.reply_text(
+            f"Такой локации нет 😢\n\n"
+            f"Доступные варианты:\n"
+            f"{available_locations}"
+        )
+        return
+
+    settings = get_user_settings(chat_id)
+    locations = get_learning_locations(settings)
+
+    if location_key not in locations:
+        locations.append(location_key)
+
+    save_learning_locations(chat_id, locations)
+    update_user_setting(chat_id, "learning_enabled", True)
+
+    await update.message.reply_text(
+        f"✅ Локация добавлена в auto-learning.\n\n"
+        f"Теперь бот обучается по:\n"
+        f"{build_learning_locations_text(locations)}"
+    )
+
+
+async def learning_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    settings = get_user_settings(chat_id)
+    locations = get_learning_locations(settings)
+
+    if not context.args:
+        await update.message.reply_text(
+            f"Какую локацию убрать из auto-learning?\n\n"
+            f"{build_learning_locations_text(locations)}"
+        )
+        return
+
+    location_key = context.args[0].lower()
+
+    if location_key not in locations:
+        await update.message.reply_text(
+            f"Этой локации нет в списке auto-learning.\n\n"
+            f"Сейчас выбраны:\n"
+            f"{build_learning_locations_text(locations)}"
+        )
+        return
+
+    locations.remove(location_key)
+    save_learning_locations(chat_id, locations)
+
+    await update.message.reply_text(
+        f"✅ Локация убрана из auto-learning.\n\n"
+        f"Остались:\n"
+        f"{build_learning_locations_text(locations)}"
+    )
+
+
+async def learning_locations(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    settings = get_user_settings(chat_id)
+    locations = get_learning_locations(settings)
+
+    await update.message.reply_text(
+        f"🧪 Локации auto-learning\n\n"
+        f"{build_learning_locations_text(locations)}\n\n"
+        f"Добавить: /learning_add kalyazin\n"
+        f"Убрать: /learning_remove kalyazin"
+    )
 
 
 async def learning_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2366,17 +2511,19 @@ async def learning_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending_count = len(user_forecasts) - verified_count
 
     is_enabled = user_settings.get("learning_enabled", False)
-    location_key = user_settings.get("learning_location_key", "home")
-    location = get_home_location_for_chat(chat_id) if location_key == "home" else get_location_by_key(location_key)
+    learning_locations = get_learning_locations(user_settings)
 
     await update.message.reply_text(
         f"🧪 Auto-learning status\n\n"
         f"Режим: {'включён' if is_enabled else 'выключен'}\n"
-        f"Локация: {location['name']} ({location_key})\n"
+        f"Локации:\n"
+        f"{build_learning_locations_text(learning_locations)}\n\n"
         f"Всего learning-записей: {len(user_forecasts)}\n"
         f"Проверено: {verified_count}\n"
         f"Ждут проверки: {pending_count}\n\n"
         f"Включить: /learning_on\n"
+        f"Добавить место: /learning_add kalyazin\n"
+        f"Убрать место: /learning_remove kalyazin\n"
         f"Сохранить тест: /learning_now\n"
         f"Проверить тест: /learning_verify_now"
     )
@@ -2385,27 +2532,30 @@ async def learning_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def learning_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_settings = get_user_settings(chat_id)
-    location_key = user_settings.get("learning_location_key", "home")
+    learning_locations = get_learning_locations(user_settings)
+    saved = []
+    skipped = []
 
-    try:
-        forecast, created = save_learning_forecast(chat_id, location_key)
-    except Exception as e:
-        await update.message.reply_text(f"Не смог сохранить learning-прогноз: {e}")
-        return
+    for location_key in learning_locations:
+        try:
+            forecast, created = save_learning_forecast(chat_id, location_key)
 
-    if created:
-        await update.message.reply_text(
-            f"✅ Learning-прогноз сохранён.\n\n"
-            f"📍 {forecast['location']}\n"
-            f"🕒 {forecast['created_at']}\n"
-            f"Проверить вручную: /learning_verify_now"
-        )
-    else:
-        await update.message.reply_text(
-            f"Сегодня learning-прогноз уже сохранён.\n\n"
-            f"📍 {forecast['location']}\n"
-            f"🕒 {forecast['created_at']}"
-        )
+            if created:
+                saved.append(f"• {forecast['location']}")
+            else:
+                skipped.append(f"• {forecast['location']}")
+        except Exception as e:
+            skipped.append(f"• {location_key}: ошибка {e}")
+
+    saved_text = "\n".join(saved) if saved else "нет новых"
+    skipped_text = "\n".join(skipped) if skipped else "нет"
+
+    await update.message.reply_text(
+        f"🧪 Learning-прогнозы\n\n"
+        f"Сохранено:\n{saved_text}\n\n"
+        f"Уже было/ошибки:\n{skipped_text}\n\n"
+        f"Проверить вручную: /learning_verify_now"
+    )
 
 
 async def learning_verify_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2445,17 +2595,23 @@ async def check_learning_schedule(context: ContextTypes.DEFAULT_TYPE):
             if settings.get("last_learning_forecast_date") == today:
                 continue
 
+            saved_locations = []
+
             try:
-                location_key = settings.get("learning_location_key", "home")
-                forecast, created = save_learning_forecast(chat_id, location_key)
+                for location_key in get_learning_locations(settings):
+                    forecast, created = save_learning_forecast(chat_id, location_key)
+
+                    if created:
+                        saved_locations.append(forecast["location"])
+
                 settings["last_learning_forecast_date"] = today
 
-                if created:
+                if saved_locations:
                     await context.bot.send_message(
                         chat_id=chat_id,
                         text=(
-                            f"🧪 Learning: утренний прогноз сохранён.\n\n"
-                            f"📍 {forecast['location']}\n"
+                            f"🧪 Learning: утренние прогнозы сохранены.\n\n"
+                            f"📍 Локации: {', '.join(saved_locations)}\n"
                             f"Вечером бот проверит факт и обновит веса."
                         ),
                     )
@@ -2517,6 +2673,9 @@ def main():
     app.add_handler(CommandHandler("learning_on", learning_on))
     app.add_handler(CommandHandler("learning_off", learning_off))
     app.add_handler(CommandHandler("learning_status", learning_status))
+    app.add_handler(CommandHandler("learning_add", learning_add))
+    app.add_handler(CommandHandler("learning_remove", learning_remove))
+    app.add_handler(CommandHandler("learning_locations", learning_locations))
     app.add_handler(CommandHandler("learning_now", learning_now))
     app.add_handler(CommandHandler("learning_verify_now", learning_verify_now))
     app.add_handler(CommandHandler("weekend", weekend))
