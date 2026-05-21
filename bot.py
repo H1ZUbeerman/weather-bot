@@ -2632,18 +2632,17 @@ async def set_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_key = get_user_home_location_key(chat_id)
         current_location = get_user_home_location(chat_id)
 
-        await update.message.reply_text(
-            f"🏠 Текущая домашняя локация: {current_location['name']}\n\n"
-            f"Чтобы изменить, используй:\n"
-            f"/set_home home\n"
-            f"/set_home moscow\n"
-            f"/set_home sergiev\n"
-            f"/set_home kalyazin\n"
-            f"/set_home khvoynaya\n"
-            f"/set_home lyubytino\n\n"
-            f"Сейчас ключ: {current_key}\n\n"
-            f"Важно: это меняет home только для тебя."
-        )
+        available_locations = "\n".join(
+    [f"/set_home {key}" for key in FAVORITE_LOCATIONS.keys()]
+)
+
+await update.message.reply_text(
+    f"🏠 Текущая домашняя локация: {current_location['name']}\n\n"
+    f"Чтобы изменить, используй:\n"
+    f"{available_locations}\n\n"
+    f"Сейчас ключ: {current_key}\n\n"
+    f"Важно: это меняет home только для тебя."
+)
         return
 
     location_key = context.args[0].lower()

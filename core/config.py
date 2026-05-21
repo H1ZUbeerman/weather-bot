@@ -66,7 +66,7 @@ FAVORITE_LOCATIONS = {
         "region_type": "mixed",
     },
 
-    "Moscow Ilya": {
+    "Moscow_ilya": {
         "name": "Москва Илья",
         "country": "Россия",
         "latitude": 55.873819,
