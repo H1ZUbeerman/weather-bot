@@ -2628,21 +2628,22 @@ def is_valid_time_string(value):
 async def set_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
-    if not context.args:
-        current_key = get_user_home_location_key(chat_id)
-        current_location = get_user_home_location(chat_id)
+       if not context.args:
+        user_settings = get_user_settings(chat_id)
+        current_key = user_settings.get("home_location_key", "home")
+        current_location = get_location_by_key(current_key)
 
         available_locations = "\n".join(
-    [f"/set_home {key}" for key in FAVORITE_LOCATIONS.keys()]
-)
+            [f"/set_home {key}" for key in FAVORITE_LOCATIONS.keys()]
+        )
 
-await update.message.reply_text(
-    f"🏠 Текущая домашняя локация: {current_location['name']}\n\n"
-    f"Чтобы изменить, используй:\n"
-    f"{available_locations}\n\n"
-    f"Сейчас ключ: {current_key}\n\n"
-    f"Важно: это меняет home только для тебя."
-)
+        await update.message.reply_text(
+            f"🏠 Текущая домашняя локация: {current_location['name']}\n\n"
+            f"Чтобы изменить, используй:\n"
+            f"{available_locations}\n\n"
+            f"Сейчас ключ: {current_key}\n\n"
+            f"Важно: это меняет home только для тебя."
+        )
         return
 
     location_key = context.args[0].lower()
