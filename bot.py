@@ -1415,6 +1415,157 @@ def build_morning_message_for_location(location):
     )
 
 
+def format_contextual_rain(rain):
+    if rain >= 70:
+        return "🔴 высокий риск дождя"
+    if rain >= 50:
+        return "🟠 заметный риск дождя"
+    if rain >= 30:
+        return "🟡 возможен дождь"
+    return "🟢 дождь маловероятен"
+
+
+def format_contextual_wind(wind):
+    if wind >= 35:
+        return "🔴 очень сильный ветер"
+    if wind >= 25:
+        return "🟠 сильный ветер"
+    if wind >= 16:
+        return "🟡 ощутимый ветер"
+    return "🟢 ветер комфортный"
+
+
+def build_contextual_trip_summary(
+    location,
+    tomorrow_c,
+    tomorrow_score,
+    saturday_c,
+    saturday_score,
+    sunday_c,
+    sunday_score,
+    best_week_day,
+    worst_week_day,
+):
+    lines = []
+
+    if tomorrow_score >= 70:
+        lines.append("🟢 Завтра условия в целом подходят для поездки.")
+    elif tomorrow_score >= 45:
+        lines.append("🟡 Завтра ехать можно, но лучше иметь запасной план.")
+    else:
+        lines.append("🔴 Завтра активную поездку лучше не планировать.")
+
+    if tomorrow_c["avg_rain"] >= 50:
+        lines.append("☔ Зонт/дождевик лучше взять: риск дождя заметный.")
+    elif tomorrow_c["avg_rain"] >= 30:
+        lines.append("🌦 Дождь не главный риск, но лёгкий дождевик не помешает.")
+    else:
+        lines.append("✅ По дождю ситуация спокойная.")
+
+    if tomorrow_c["avg_wind"] >= 25:
+        lines.append("💨 Ветер может мешать прогулкам и активностям на открытом месте.")
+    elif tomorrow_c["avg_wind"] >= 16:
+        lines.append("🌬 Ветер ощутимый: лучше взять верхний слой одежды.")
+
+    weekend_best = "суббота" if saturday_score >= sunday_score else "воскресенье"
+    weekend_score = max(saturday_score, sunday_score)
+
+    if weekend_score >= 55:
+        lines.append(f"🏕 Из выходных лучше выглядит {weekend_best}.")
+    else:
+        lines.append("🏕 Выходные выглядят спорно: лучше планировать короткий формат или запасной вариант.")
+
+    lines.append(
+        f"🏆 Лучший день недели: {best_week_day['date']} — {best_week_day['score']}/100."
+    )
+    lines.append(
+        f"⚠️ Худший день недели: {worst_week_day['date']} — дождь ~{worst_week_day['rain']}%, ветер ~{worst_week_day['wind']} км/ч."
+    )
+
+    if tomorrow_c.get("rain_confidence") == "низкая":
+        lines.append("📊 По осадкам модели спорят — прогноз по дождю ненадёжный.")
+
+    return "\n".join(lines)
+
+
+def build_contextual_baidarka_summary(
+    location,
+    best_window,
+    worst_window,
+    saturday_c,
+    saturday_score,
+    sunday_c,
+    sunday_score,
+):
+    lines = []
+
+    if best_window["score"] >= 70:
+        lines.append("🟢 Для байдарки есть хорошее погодное окно.")
+    elif best_window["score"] >= 50:
+        lines.append("🟡 Для байдарки условия средние: идти можно аккуратно.")
+    else:
+        lines.append("🔴 Хорошего окна для байдарки почти нет.")
+
+    lines.append(
+        f"🏆 Лучшее окно: {best_window['day_label']} {best_window['part_title']} — "
+        f"ветер до ~{best_window['wind']} км/ч, дождь ~{best_window['rain']}%."
+    )
+
+    if best_window["wind"] >= 20:
+        lines.append("🌊 На открытой воде может быть некомфортно из-за ветра.")
+    if best_window["rain"] >= 50:
+        lines.append("☔ Нужен дождевик/гермомешок: риск дождя заметный.")
+
+    lines.append(
+        f"⚠️ Худшее окно: {worst_window['day_label']} {worst_window['part_title']} — "
+        f"лучше не выходить на воду."
+    )
+
+    if saturday_score >= sunday_score:
+        lines.append(f"🏕 Из выходных лучше суббота: {saturday_score}/100.")
+    else:
+        lines.append(f"🏕 Из выходных лучше воскресенье: {sunday_score}/100.")
+
+    lines.append("🦺 Минимум: спасжилет, гермомешок, дождевик и запасной сухой слой.")
+
+    return "\n".join(lines)
+
+
+def build_contextual_camping_summary(location, best_day, worst_day, week_data):
+    lines = []
+
+    if best_day["score"] >= 70:
+        lines.append("🟢 Для палатки есть хороший день.")
+    elif best_day["score"] >= 50:
+        lines.append("🟡 Палатку можно планировать, но с погодными оговорками.")
+    else:
+        lines.append("🔴 На неделе нет явно комфортного дня для палатки.")
+
+    lines.append(
+        f"🏆 Лучший день: {best_day['date']} — день ~{best_day['day_temp']}°C, "
+        f"ночь ~{best_day['night_temp']}°C, дождь ~{best_day['rain']}%."
+    )
+
+    if best_day["night_temp"] <= 7:
+        lines.append("🌙 Ночь холодная: нужен тёплый спальник и утепление.")
+    elif best_day["night_temp"] <= 12:
+        lines.append("🌙 Ночью прохладно: лучше взять тёплый слой.")
+
+    if best_day["rain"] >= 50:
+        lines.append("☔ Для палатки обязателен тент/защита от дождя.")
+    if best_day["wind"] >= 25:
+        lines.append("💨 Ветер заметный: хорошо закрепи палатку и не ставь её под деревьями.")
+
+    lines.append(
+        f"⚠️ Худший день: {worst_day['date']} — дождь ~{worst_day['rain']}%, "
+        f"ветер ~{worst_day['wind']} км/ч."
+    )
+
+    lines.append("🎒 Базово взять: тент, сухой комплект, пауэрбанк, фонарь, тёплый слой.")
+
+    return "\n".join(lines)
+
+
 
 async def trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     location = get_location(context)
@@ -1503,21 +1654,17 @@ async def trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     best_week_day = max(week_items, key=lambda x: x["score"])
     worst_week_day = min(week_items, key=lambda x: x["score"])
 
-    ai_prompt = build_outdoor_reasoning_prompt(
-    "trip",
-    location,
-    {
-        "tomorrow": tomorrow_c,
-        "tomorrow_score": tomorrow_score,
-        "saturday": saturday_c,
-        "saturday_score": saturday_score,
-        "sunday": sunday_c,
-        "sunday_score": sunday_score,
-        "week": week_items,
-    },
-)
-
-    ai_summary = get_ai_summary(ai_prompt)
+    ai_summary = build_contextual_trip_summary(
+        location,
+        tomorrow_c,
+        tomorrow_score,
+        saturday_c,
+        saturday_score,
+        sunday_c,
+        sunday_score,
+        best_week_day,
+        worst_week_day,
+    )
 
     message = build_trip_message(
     location,
@@ -1626,19 +1773,15 @@ async def baidarka(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sunday_c["rain_spread"],
     )
 
-    ai_prompt = build_outdoor_reasoning_prompt(
-    "baidarka",
-    location,
-    {
-        "best_window": best_window,
-        "worst_window": worst_window,
-        "parts": part_candidates,
-        "saturday": saturday_c,
-        "sunday": sunday_c,
-    },
-)
-
-    ai_summary = get_ai_summary(ai_prompt)
+    ai_summary = build_contextual_baidarka_summary(
+        location,
+        best_window,
+        worst_window,
+        saturday_c,
+        saturday_score,
+        sunday_c,
+        sunday_score,
+    )
 
     message = build_baidarka_message(
     location,
@@ -1758,17 +1901,12 @@ async def camping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     best_day = max(week_data, key=lambda x: x["score"])
     worst_day = min(week_data, key=lambda x: x["score"])
 
-    ai_prompt = build_outdoor_reasoning_prompt(
-    "camping",
-    location,
-    {
-        "best_day": best_day,
-        "worst_day": worst_day,
-        "week_data": week_data,
-    },
-)
-
-    ai_summary = get_ai_summary(ai_prompt)
+    ai_summary = build_contextual_camping_summary(
+        location,
+        best_day,
+        worst_day,
+        week_data,
+    )
 
     message = build_camping_message(
     location,
