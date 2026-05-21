@@ -2652,7 +2652,9 @@ async def set_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Такой избранной локации нет 😢\n\n"
             "Доступные варианты:\n"
-            "home, moscow, sergiev, kalyazin, khvoynaya, lyubytino"
+            "home, moscow_center, moscow_north, moscow_south, "
+            "moscow_west, moscow_east, sergiev, "
+            "kalyazin, khvoynaya, lyubytino"
         )
         return
 

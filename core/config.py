@@ -57,6 +57,61 @@ FAVORITE_LOCATIONS = {
         "longitude": 33.3920,
         "region_type": "forest",
     },
+
+    "sergiev": {
+        "name": "Сергиев Посад",
+        "country": "Россия",
+        "latitude": 56.3153,
+        "longitude": 38.1358,
+        "region_type": "mixed",
+    },
+
+    "Moscow Ilya": {
+        "name": "Москва Илья",
+        "country": "Россия",
+        "latitude": 55.873819,
+        "longitude": 37.610251,
+        "region_type": "mixed",
+    },
+    "moscow_center": {
+        "name": "Москва Центр",
+        "country": "Россия",
+        "latitude": 55.7558,
+        "longitude": 37.6176,
+        "region_type": "urban",
+    },
+
+    "moscow_north": {
+        "name": "Москва Север",
+        "country": "Россия",
+        "latitude": 55.8800,
+        "longitude": 37.5500,
+        "region_type": "urban",
+    },
+
+    "moscow_south": {
+        "name": "Москва Юг",
+        "country": "Россия",
+        "latitude": 55.6200,
+        "longitude": 37.6500,
+        "region_type": "urban",
+    },
+
+    "moscow_west": {
+        "name": "Москва Запад",
+        "country": "Россия",
+        "latitude": 55.7400,
+        "longitude": 37.4200,
+        "region_type": "urban",
+    },
+
+    "moscow_east": {
+        "name": "Москва Восток",
+        "country": "Россия",
+        "latitude": 55.7800,
+        "longitude": 37.8200,
+        "region_type": "urban",
+    },
 }
 
 
