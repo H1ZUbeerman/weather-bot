@@ -181,14 +181,238 @@ def remove_morning_subscriber(chat_id):
 
 
 
+LOCATION_MODEL_SCORES_FILE = "location_model_scores.json"
+
+
+def get_location_key_from_location(location):
+    for key, favorite_location in FAVORITE_LOCATIONS.items():
+        if (
+            favorite_location.get("name") == location.get("name")
+            and round(float(favorite_location.get("latitude")), 4) == round(float(location.get("latitude")), 4)
+            and round(float(favorite_location.get("longitude")), 4) == round(float(location.get("longitude")), 4)
+        ):
+            return key
+
+    for key, favorite_location in FAVORITE_LOCATIONS.items():
+        if favorite_location.get("name") == location.get("name"):
+            return key
+
+    return None
+
+
+def default_location_model_scores():
+    return {
+        "temperature": {
+            "openmeteo": {"checks": 0, "total_error": 0, "wins": 0},
+            "weatherapi": {"checks": 0, "total_error": 0, "wins": 0},
+            "visualcrossing": {"checks": 0, "total_error": 0, "wins": 0},
+            "yr": {"checks": 0, "total_error": 0, "wins": 0},
+            "meteosource": {"checks": 0, "total_error": 0, "wins": 0},
+            "consensus": {"checks": 0, "total_error": 0, "wins": 0},
+        },
+        "rain": {
+            "openmeteo": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
+            "weatherapi": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
+            "visualcrossing": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
+            "yr": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
+            "meteosource": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
+            "consensus": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
+        },
+        "wind": {
+            "openmeteo": {"checks": 0, "total_error": 0, "wins": 0},
+            "weatherapi": {"checks": 0, "total_error": 0, "wins": 0},
+            "visualcrossing": {"checks": 0, "total_error": 0, "wins": 0},
+            "yr": {"checks": 0, "total_error": 0, "wins": 0},
+            "meteosource": {"checks": 0, "total_error": 0, "wins": 0},
+            "consensus": {"checks": 0, "total_error": 0, "wins": 0},
+        },
+    }
+
+
+def load_location_model_scores():
+    return load_json_file(LOCATION_MODEL_SCORES_FILE, {})
+
+
+def save_location_model_scores(data):
+    save_json_file(LOCATION_MODEL_SCORES_FILE, data)
+
+
+def ensure_location_scores(data, location_key):
+    if location_key not in data:
+        data[location_key] = default_location_model_scores()
+
+    default_scores = default_location_model_scores()
+
+    for section, models in default_scores.items():
+        if section not in data[location_key]:
+            data[location_key][section] = models
+
+        for model, model_defaults in models.items():
+            if model not in data[location_key][section]:
+                data[location_key][section][model] = model_defaults
+
+            for metric_key, metric_value in model_defaults.items():
+                if metric_key not in data[location_key][section][model]:
+                    data[location_key][section][model][metric_key] = metric_value
+
+    return data
+
+
+def update_error_scores_for_section(section_scores, errors, consensus_error):
+    all_errors = dict(errors)
+    all_errors["consensus"] = consensus_error
+
+    best_model = min(all_errors, key=all_errors.get)
+
+    for model, error in all_errors.items():
+        if model not in section_scores:
+            continue
+
+        section_scores[model]["checks"] += 1
+        section_scores[model]["total_error"] += error
+
+        if model == best_model:
+            section_scores[model]["wins"] += 1
+
+    return best_model
+
+
+def update_location_rain_scores(section_scores, predictions, factual_rain_score):
+    fact_is_rain = factual_rain_score >= 25
+
+    for model, predicted_score in predictions.items():
+        if model not in section_scores:
+            continue
+
+        predicted_is_rain = predicted_score >= 30
+
+        section_scores[model]["checks"] += 1
+        section_scores[model]["total_error"] += abs(predicted_score - factual_rain_score)
+
+        if predicted_is_rain == fact_is_rain:
+            section_scores[model]["correct"] += 1
+        elif predicted_is_rain and not fact_is_rain:
+            section_scores[model]["false_positive"] += 1
+        elif not predicted_is_rain and fact_is_rain:
+            section_scores[model]["missed"] += 1
+
+
+def update_location_model_scores(location_key, temp_errors, consensus_temp_error, wind_errors, consensus_wind_error, rain_predictions, factual_rain_score):
+    if not location_key:
+        return None
+
+    data = load_location_model_scores()
+    data = ensure_location_scores(data, location_key)
+
+    best_temp_model = update_error_scores_for_section(
+        data[location_key]["temperature"],
+        temp_errors,
+        consensus_temp_error,
+    )
+
+    best_wind_model = update_error_scores_for_section(
+        data[location_key]["wind"],
+        wind_errors,
+        consensus_wind_error,
+    )
+
+    if rain_predictions:
+        update_location_rain_scores(
+            data[location_key]["rain"],
+            rain_predictions,
+            factual_rain_score,
+        )
+
+    save_location_model_scores(data)
+
+    return {
+        "best_temp_model": best_temp_model,
+        "best_wind_model": best_wind_model,
+    }
+
+
+def calculate_location_adaptive_weights(location_key):
+    data = load_location_model_scores()
+
+    if location_key not in data:
+        return None
+
+    scores = data[location_key]
+    models = ["openmeteo", "weatherapi", "visualcrossing", "yr", "meteosource"]
+
+    total_checks = sum(scores.get("temperature", {}).get(model, {}).get("checks", 0) for model in models)
+
+    if total_checks == 0:
+        return None
+
+    quality = {}
+
+    for model in models:
+        temp_data = scores["temperature"].get(model, {})
+        wind_data = scores["wind"].get(model, {})
+        rain_data = scores["rain"].get(model, {})
+
+        temp_checks = temp_data.get("checks", 0)
+        wind_checks = wind_data.get("checks", 0)
+        rain_checks = rain_data.get("checks", 0)
+
+        temp_quality = 0.01
+        wind_quality = 0.01
+        rain_quality = 0.01
+
+        if temp_checks > 0:
+            avg_temp_error = temp_data.get("total_error", 0) / temp_checks
+            temp_win_rate = temp_data.get("wins", 0) / temp_checks
+            temp_quality = (1 / (avg_temp_error + 0.1)) + (temp_win_rate * 0.3)
+
+        if wind_checks > 0:
+            avg_wind_error = wind_data.get("total_error", 0) / wind_checks
+            wind_win_rate = wind_data.get("wins", 0) / wind_checks
+            wind_quality = (1 / ((avg_wind_error / 5) + 0.1)) + (wind_win_rate * 0.2)
+
+        if rain_checks > 0:
+            avg_rain_error = rain_data.get("total_error", 0) / rain_checks
+            rain_accuracy = rain_data.get("correct", 0) / rain_checks
+            rain_quality = (1 / ((avg_rain_error / 20) + 0.1)) + (rain_accuracy * 0.5)
+
+        # Температура важнее всего, потом осадки, потом ветер.
+        quality[model] = (temp_quality * 0.55) + (rain_quality * 0.30) + (wind_quality * 0.15)
+
+    total_quality = sum(quality.values())
+
+    if total_quality <= 0:
+        return None
+
+    adaptive_weights = {
+        model: round(score / total_quality, 2)
+        for model, score in quality.items()
+    }
+
+    correction = round(1 - sum(adaptive_weights.values()), 2)
+
+    if correction != 0:
+        best_model = max(adaptive_weights, key=adaptive_weights.get)
+        adaptive_weights[best_model] = round(adaptive_weights[best_model] + correction, 2)
+
+    return adaptive_weights
+
+
+
+
 def get_weights_for_location(location):
+    location_key = get_location_key_from_location(location)
+    location_weights = calculate_location_adaptive_weights(location_key) if location_key else None
+
+    if location_weights:
+        return location_weights, f"adaptive_location:{location_key}"
+
     adaptive_weights = get_adaptive_weights_from_scores()
 
     if adaptive_weights:
-        return adaptive_weights, "adaptive"
+        return adaptive_weights, "adaptive_global"
 
-    region_type = location["region_type"]
-    return REGION_WEIGHTS[region_type], f"regional:{region_type}"
+    region_type = location.get("region_type", "mixed")
+    return REGION_WEIGHTS.get(region_type, REGION_WEIGHTS["mixed"]), f"regional:{region_type}"
 
 
 def get_yr_data(lat, lon):
@@ -676,6 +900,26 @@ def verify_auto_learning_forecast(item):
     consensus_temp_error = round(abs(saved_temps["consensus"] - factual_temp), 1)
     best_temp_model = update_model_scores(temp_errors, consensus_temp_error)
 
+    current_wind_values = current["winds"]
+    factual_wind = round(sum(current_wind_values.values()) / len(current_wind_values), 1)
+
+    saved_winds = item["forecast"].get("winds", {})
+
+    wind_errors = {}
+
+    for source, predicted_wind in saved_winds.items():
+        if source == "consensus":
+            continue
+
+        wind_errors[source] = round(abs(predicted_wind - factual_wind), 1)
+
+    consensus_wind_error = None
+
+    if saved_winds.get("consensus") is not None:
+        consensus_wind_error = round(abs(saved_winds["consensus"] - factual_wind), 1)
+    else:
+        consensus_wind_error = round(sum(wind_errors.values()) / len(wind_errors), 1) if wind_errors else 0
+
     current_rain_values = current["rain"]
     factual_rain_score = round(sum(current_rain_values.values()) / len(current_rain_values), 1)
 
@@ -691,16 +935,133 @@ def verify_auto_learning_forecast(item):
     if rain_predictions:
         update_rain_scores(rain_predictions, factual_rain_score)
 
+    location_learning_result = update_location_model_scores(
+        item.get("location_key"),
+        temp_errors,
+        consensus_temp_error,
+        wind_errors,
+        consensus_wind_error,
+        rain_predictions,
+        factual_rain_score,
+    )
+
     item["verified"] = True
     item["verified_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     item["temperature_errors"] = temp_errors
     item["temperature_consensus_error"] = consensus_temp_error
     item["best_temperature_model"] = best_temp_model
     item["factual_temperature"] = factual_temp
+    item["wind_errors"] = wind_errors
+    item["wind_consensus_error"] = consensus_wind_error
+    item["factual_wind"] = factual_wind
     item["rain_errors"] = rain_errors
     item["factual_rain_score"] = factual_rain_score
 
+    if location_learning_result:
+        item["location_best_temperature_model"] = location_learning_result.get("best_temp_model")
+        item["location_best_wind_model"] = location_learning_result.get("best_wind_model")
+
     return item
+
+
+async def location_scores(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = load_location_model_scores()
+
+    if not data:
+        await update.message.reply_text(
+            "Пока нет location learning данных.\n\n"
+            "Запусти:\n"
+            "/learning_forecast_all_now\n"
+            "а позже:\n"
+            "/learning_verify_all_now"
+        )
+        return
+
+    requested_key = context.args[0] if context.args else None
+
+    if requested_key:
+        keys = [requested_key]
+    else:
+        keys = list(FAVORITE_LOCATIONS.keys())
+
+    message = "🧠 Location learning scores\n\n"
+
+    for location_key in keys:
+        if location_key not in data:
+            continue
+
+        location = FAVORITE_LOCATIONS.get(location_key, {"name": location_key})
+        weights = calculate_location_adaptive_weights(location_key)
+
+        temp_scores = data[location_key].get("temperature", {})
+        rain_scores = data[location_key].get("rain", {})
+        wind_scores = data[location_key].get("wind", {})
+
+        message += f"📍 {location.get('name')} ({location_key})\n"
+
+        if weights:
+            top_model = max(weights, key=weights.get)
+            message += f"⚖️ Top weight: {top_model} — {round(weights[top_model] * 100)}%\n"
+
+        temp_best = None
+        temp_best_error = None
+
+        for model, item in temp_scores.items():
+            if model == "consensus" or item.get("checks", 0) == 0:
+                continue
+
+            avg_error = item.get("total_error", 0) / item.get("checks", 1)
+
+            if temp_best_error is None or avg_error < temp_best_error:
+                temp_best_error = avg_error
+                temp_best = model
+
+        rain_best = None
+        rain_best_accuracy = None
+
+        for model, item in rain_scores.items():
+            if model == "consensus" or item.get("checks", 0) == 0:
+                continue
+
+            accuracy = item.get("correct", 0) / item.get("checks", 1)
+
+            if rain_best_accuracy is None or accuracy > rain_best_accuracy:
+                rain_best_accuracy = accuracy
+                rain_best = model
+
+        wind_best = None
+        wind_best_error = None
+
+        for model, item in wind_scores.items():
+            if model == "consensus" or item.get("checks", 0) == 0:
+                continue
+
+            avg_error = item.get("total_error", 0) / item.get("checks", 1)
+
+            if wind_best_error is None or avg_error < wind_best_error:
+                wind_best_error = avg_error
+                wind_best = model
+
+        message += f"🌡 Temp best: {temp_best or 'нет данных'}"
+        if temp_best_error is not None:
+            message += f" (~{round(temp_best_error, 1)}°C error)"
+        message += "\n"
+
+        message += f"☔ Rain best: {rain_best or 'нет данных'}"
+        if rain_best_accuracy is not None:
+            message += f" (~{round(rain_best_accuracy * 100)}% accuracy)"
+        message += "\n"
+
+        message += f"💨 Wind best: {wind_best or 'нет данных'}"
+        if wind_best_error is not None:
+            message += f" (~{round(wind_best_error, 1)} км/ч error)"
+        message += "\n\n"
+
+        if len(message) > 3300:
+            message += "...список сокращён."
+            break
+
+    await update.message.reply_text(message)
 
 
 async def subscribe_learning(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -754,7 +1115,8 @@ async def learning_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Файлы:\n"
         f"📁 learning_forecasts.json\n"
         f"📁 model_scores.json\n"
-        f"📁 rain_scores.json"
+        f"📁 rain_scores.json\n"
+        f"📁 location_model_scores.json"
     )
 
     await update.message.reply_text(message)
@@ -3231,6 +3593,7 @@ async def setup_bot_commands(app):
         BotCommand("dashboard", "Dashboard"),
         BotCommand("scores", "Веса моделей"),
         BotCommand("adaptive", "Adaptive weights"),
+        BotCommand("location_scores", "Learning по локациям"),
         BotCommand("status", "Статус бота"),
         BotCommand("set_home", "Изменить домашнюю локацию"),
     ]
@@ -3272,6 +3635,7 @@ def main():
     app.add_handler(CommandHandler("subscribe_learning", subscribe_learning))
     app.add_handler(CommandHandler("unsubscribe_learning", unsubscribe_learning))
     app.add_handler(CommandHandler("learning_status", learning_status))
+    app.add_handler(CommandHandler("location_scores", location_scores))
     app.add_handler(CommandHandler("dashboard", dashboard))
     app.add_handler(CommandHandler("learning_forecast_now", run_learning_forecast_now))
     app.add_handler(CommandHandler("learning_verify_now", run_learning_verify_now))
