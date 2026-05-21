@@ -1503,15 +1503,18 @@ async def trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     best_week_day = max(week_items, key=lambda x: x["score"])
     worst_week_day = min(week_items, key=lambda x: x["score"])
 
-    ai_prompt = build_trip_prompt(
+    ai_prompt = build_outdoor_reasoning_prompt(
+    "trip",
     location,
-    tomorrow_c,
-    tomorrow_score,
-    saturday_c,
-    saturday_score,
-    sunday_c,
-    sunday_score,
-    week_items,
+    {
+        "tomorrow": tomorrow_c,
+        "tomorrow_score": tomorrow_score,
+        "saturday": saturday_c,
+        "saturday_score": saturday_score,
+        "sunday": sunday_c,
+        "sunday_score": sunday_score,
+        "week": week_items,
+    },
 )
 
     ai_summary = get_ai_summary(ai_prompt)
@@ -1623,15 +1626,16 @@ async def baidarka(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sunday_c["rain_spread"],
     )
 
-    ai_prompt = build_baidarka_prompt(
+    ai_prompt = build_outdoor_reasoning_prompt(
+    "baidarka",
     location,
-    part_candidates,
-    best_window,
-    worst_window,
-    saturday_c,
-    saturday_score,
-    sunday_c,
-    sunday_score,
+    {
+        "best_window": best_window,
+        "worst_window": worst_window,
+        "parts": part_candidates,
+        "saturday": saturday_c,
+        "sunday": sunday_c,
+    },
 )
 
     ai_summary = get_ai_summary(ai_prompt)
@@ -1754,11 +1758,14 @@ async def camping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     best_day = max(week_data, key=lambda x: x["score"])
     worst_day = min(week_data, key=lambda x: x["score"])
 
-    ai_prompt = build_camping_prompt(
+    ai_prompt = build_outdoor_reasoning_prompt(
+    "camping",
     location,
-    week_data,
-    best_day,
-    worst_day,
+    {
+        "best_day": best_day,
+        "worst_day": worst_day,
+        "week_data": week_data,
+    },
 )
 
     ai_summary = get_ai_summary(ai_prompt)
