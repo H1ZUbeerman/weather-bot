@@ -53,6 +53,12 @@ def get_user_settings(chat_id):
     data = load_user_settings()
     return data.get(str(chat_id), {})
 
+
+def load_all_user_settings():
+    data = load_user_settings()
+    return data if isinstance(data, dict) else {}
+
+
 def update_user_setting(chat_id, key, value):
     data = load_user_settings()
     chat_key = str(chat_id)
@@ -164,6 +170,15 @@ def load_morning_subscribers():
 
 def save_morning_subscribers(subscribers):
     save_json_file(MORNING_SUBSCRIBERS_FILE, subscribers)
+
+
+def load_learning_forecasts():
+    forecasts = load_json_file(LEARNING_FILE, [])
+    return forecasts if isinstance(forecasts, list) else []
+
+
+def save_learning_forecasts(forecasts):
+    save_json_file(LEARNING_FILE, forecasts)
 
 
 def find_morning_subscriber(subscribers, chat_id):
@@ -856,6 +871,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/morning_off\n"
         "/morning_time\n"
         "/morning_now\n"
+        "/learning_on\n"
+        "/learning_off\n"
+        "/learning_status\n"
+        "/learning_now\n"
+        "/learning_verify_now\n"
         "/status\n\n"
         "Локации:\n"
         "/home\n"
@@ -1126,6 +1146,126 @@ def build_morning_briefing(location):
     )
 
     return message
+
+
+def build_learning_forecast(chat_id, location_key):
+    location = get_home_location_for_chat(chat_id) if location_key == "home" else get_location_by_key(location_key)
+    current = get_current_sources(location)
+    c = build_consensus(location, current)
+    now = datetime.now(ZoneInfo(DEFAULT_TIMEZONE))
+
+    forecast = {
+        "id": f"{chat_id}-{now.strftime('%Y%m%d%H%M%S')}",
+        "chat_id": str(chat_id),
+        "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "date": now.strftime("%Y-%m-%d"),
+        "location": location["name"],
+        "location_key": location_key,
+        "forecast": {
+            "region_type": location["region_type"],
+            "temperatures": {**c["temp_values"], "consensus": c["avg_temp"]},
+            "winds": {**c["wind_values"], "consensus": c["avg_wind"]},
+            "rain": {**c["rain_values"], "consensus": c["avg_rain"]},
+            "weights_used": c["weights"],
+            "weights_mode": c["weights_mode"],
+            "temperature_confidence": c["temp_confidence"],
+            "rain_confidence": c["rain_confidence"],
+            "confidence": c["temp_confidence"],
+            "spread": c["temp_spread"],
+            "rain_spread": c["rain_spread"],
+        },
+        "verified": False,
+    }
+
+    return forecast
+
+
+def save_learning_forecast(chat_id, location_key="home"):
+    forecasts = load_learning_forecasts()
+    today = datetime.now(ZoneInfo(DEFAULT_TIMEZONE)).strftime("%Y-%m-%d")
+
+    for item in forecasts:
+        if (
+            str(item.get("chat_id")) == str(chat_id)
+            and item.get("date") == today
+            and item.get("location_key") == location_key
+            and not item.get("manual")
+        ):
+            return item, False
+
+    forecast = build_learning_forecast(chat_id, location_key)
+    forecasts.append(forecast)
+    save_learning_forecasts(forecasts)
+
+    return forecast, True
+
+
+def verify_learning_forecast(item):
+    location = get_home_location_for_chat(item.get("chat_id")) if item.get("location_key") == "home" else get_location_by_name(item.get("location"))
+
+    if not location:
+        return None
+
+    current = get_current_sources(location)
+    current_temp_values = current["temperatures"]
+    factual_temp = round(sum(current_temp_values.values()) / len(current_temp_values), 1)
+
+    current_rain_values = current["rain"]
+    factual_rain_score = round(sum(current_rain_values.values()) / len(current_rain_values), 1)
+
+    saved_forecast = item["forecast"]
+    saved_temps = saved_forecast["temperatures"]
+    saved_rain = saved_forecast.get("rain", {})
+
+    temperature_errors = {
+        source: round(abs(predicted_temp - factual_temp), 1)
+        for source, predicted_temp in saved_temps.items()
+        if source != "consensus"
+    }
+    consensus_error = round(abs(saved_temps["consensus"] - factual_temp), 1)
+    best_temperature_model = update_model_scores(temperature_errors, consensus_error)
+
+    rain_predictions = {}
+    rain_errors = {}
+
+    for source, predicted_rain in saved_rain.items():
+        rain_predictions[source] = predicted_rain
+        rain_errors[source] = round(abs(predicted_rain - factual_rain_score), 1)
+
+    update_rain_scores(rain_predictions, factual_rain_score)
+
+    item["verified"] = True
+    item["verified_at"] = datetime.now(ZoneInfo(DEFAULT_TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
+    item["temperature_errors"] = temperature_errors
+    item["rain_errors"] = rain_errors
+    item["temperature_consensus_error"] = consensus_error
+    item["best_temperature_model"] = best_temperature_model
+    item["factual_temperature"] = factual_temp
+    item["factual_rain_score"] = factual_rain_score
+
+    return item
+
+
+def verify_pending_learning_forecasts():
+    forecasts = load_learning_forecasts()
+    verified_items = []
+
+    for item in forecasts:
+        if item.get("verified"):
+            continue
+
+        try:
+            verified_item = verify_learning_forecast(item)
+
+            if verified_item:
+                verified_items.append(verified_item)
+        except Exception as e:
+            print("Learning verify error:", e)
+
+    if verified_items:
+        save_learning_forecasts(forecasts)
+
+    return verified_items
 
 
 async def tomorrow(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2018,6 +2158,183 @@ async def check_morning_alerts(context: ContextTypes.DEFAULT_TYPE):
         save_morning_subscribers(subscribers)
 
 
+async def learning_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    location_key = context.args[0].lower() if context.args else "home"
+
+    if location_key not in FAVORITE_LOCATIONS:
+        available_locations = build_location_options(command_prefix="/learning_on")
+
+        await update.message.reply_text(
+            f"Такой локации нет 😢\n\n"
+            f"Доступные варианты:\n"
+            f"{available_locations}"
+        )
+        return
+
+    update_user_setting(chat_id, "learning_enabled", True)
+    update_user_setting(chat_id, "learning_location_key", location_key)
+
+    location_text = "твой home" if location_key == "home" else FAVORITE_LOCATIONS[location_key]["name"]
+
+    await update.message.reply_text(
+        f"✅ Auto-learning включён.\n\n"
+        f"📍 Локация: {location_text}\n"
+        f"🌅 Утром бот сохранит прогноз.\n"
+        f"🌙 Вечером бот сравнит его с фактом и обновит веса.\n\n"
+        f"Тест сейчас: /learning_now"
+    )
+
+
+async def learning_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    update_user_setting(chat_id, "learning_enabled", False)
+
+    await update.message.reply_text("✅ Auto-learning выключен.")
+
+
+async def learning_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_settings = get_user_settings(chat_id)
+    forecasts = load_learning_forecasts()
+
+    user_forecasts = [
+        item for item in forecasts
+        if str(item.get("chat_id")) == str(chat_id)
+    ]
+    verified_count = sum(1 for item in user_forecasts if item.get("verified"))
+    pending_count = len(user_forecasts) - verified_count
+
+    is_enabled = user_settings.get("learning_enabled", False)
+    location_key = user_settings.get("learning_location_key", "home")
+    location = get_home_location_for_chat(chat_id) if location_key == "home" else get_location_by_key(location_key)
+
+    await update.message.reply_text(
+        f"🧪 Auto-learning status\n\n"
+        f"Режим: {'включён' if is_enabled else 'выключен'}\n"
+        f"Локация: {location['name']} ({location_key})\n"
+        f"Всего learning-записей: {len(user_forecasts)}\n"
+        f"Проверено: {verified_count}\n"
+        f"Ждут проверки: {pending_count}\n\n"
+        f"Включить: /learning_on\n"
+        f"Сохранить тест: /learning_now\n"
+        f"Проверить тест: /learning_verify_now"
+    )
+
+
+async def learning_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_settings = get_user_settings(chat_id)
+    location_key = user_settings.get("learning_location_key", "home")
+
+    try:
+        forecast, created = save_learning_forecast(chat_id, location_key)
+    except Exception as e:
+        await update.message.reply_text(f"Не смог сохранить learning-прогноз: {e}")
+        return
+
+    if created:
+        await update.message.reply_text(
+            f"✅ Learning-прогноз сохранён.\n\n"
+            f"📍 {forecast['location']}\n"
+            f"🕒 {forecast['created_at']}\n"
+            f"Проверить вручную: /learning_verify_now"
+        )
+    else:
+        await update.message.reply_text(
+            f"Сегодня learning-прогноз уже сохранён.\n\n"
+            f"📍 {forecast['location']}\n"
+            f"🕒 {forecast['created_at']}"
+        )
+
+
+async def learning_verify_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        verified_items = verify_pending_learning_forecasts()
+    except Exception as e:
+        await update.message.reply_text(f"Не смог проверить learning-прогнозы: {e}")
+        return
+
+    if not verified_items:
+        await update.message.reply_text("Нет learning-прогнозов, которые ждут проверки.")
+        return
+
+    last_item = verified_items[-1]
+
+    await update.message.reply_text(
+        f"✅ Learning-проверка выполнена.\n\n"
+        f"Проверено записей: {len(verified_items)}\n"
+        f"Последняя локация: {last_item['location']}\n"
+        f"Факт температура: ~{last_item['factual_temperature']}°C\n"
+        f"Факт rain score: ~{last_item['factual_rain_score']}\n"
+        f"Лучшая модель температуры: {last_item['best_temperature_model']}"
+    )
+
+
+async def check_learning_schedule(context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now(ZoneInfo(DEFAULT_TIMEZONE))
+    today = now.strftime("%Y-%m-%d")
+    current_time = now.strftime("%H:%M")
+    all_settings = load_all_user_settings()
+
+    if current_time == "08:05":
+        for chat_id, settings in all_settings.items():
+            if not settings.get("learning_enabled"):
+                continue
+
+            if settings.get("last_learning_forecast_date") == today:
+                continue
+
+            try:
+                location_key = settings.get("learning_location_key", "home")
+                forecast, created = save_learning_forecast(chat_id, location_key)
+                settings["last_learning_forecast_date"] = today
+
+                if created:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"🧪 Learning: утренний прогноз сохранён.\n\n"
+                            f"📍 {forecast['location']}\n"
+                            f"Вечером бот проверит факт и обновит веса."
+                        ),
+                    )
+
+            except Exception as e:
+                print("Learning forecast error:", e)
+
+        save_user_settings(all_settings)
+
+    if current_time == "21:00":
+        verified_items = verify_pending_learning_forecasts()
+
+        for chat_id, settings in all_settings.items():
+            if not settings.get("learning_enabled"):
+                continue
+
+            if settings.get("last_learning_verify_date") == today:
+                continue
+
+            user_verified_count = sum(
+                1 for item in verified_items
+                if str(item.get("chat_id")) == str(chat_id)
+            )
+
+            settings["last_learning_verify_date"] = today
+
+            if user_verified_count:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"🧪 Learning: вечерняя проверка завершена.\n\n"
+                        f"Проверено прогнозов: {user_verified_count}\n"
+                        f"Веса моделей обновлены."
+                    ),
+                )
+
+        save_user_settings(all_settings)
+
+
 def main():
     if not TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
@@ -2036,6 +2353,11 @@ def main():
     app.add_handler(CommandHandler("morning_off", morning_off))
     app.add_handler(CommandHandler("morning_time", morning_time))
     app.add_handler(CommandHandler("morning_now", morning_now))
+    app.add_handler(CommandHandler("learning_on", learning_on))
+    app.add_handler(CommandHandler("learning_off", learning_off))
+    app.add_handler(CommandHandler("learning_status", learning_status))
+    app.add_handler(CommandHandler("learning_now", learning_now))
+    app.add_handler(CommandHandler("learning_verify_now", learning_verify_now))
     app.add_handler(CommandHandler("weekend", weekend))
     app.add_handler(CommandHandler("history", history))
     app.add_handler(CommandHandler("analyze", analyze))
@@ -2055,8 +2377,9 @@ def main():
 
     if app.job_queue:
         app.job_queue.run_repeating(check_morning_alerts, interval=60, first=10)
+        app.job_queue.run_repeating(check_learning_schedule, interval=60, first=20)
     else:
-        print("Job queue недоступен: утренние брифинги по расписанию не запущены")
+        print("Job queue недоступен: расписания morning/learning не запущены")
 
     print("Бот запущен...")
     app.run_polling()
