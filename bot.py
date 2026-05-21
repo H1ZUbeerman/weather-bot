@@ -2628,7 +2628,7 @@ def is_valid_time_string(value):
 async def set_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
-       if not context.args:
+    if not context.args:
         user_settings = get_user_settings(chat_id)
         current_key = user_settings.get("home_location_key", "home")
         current_location = get_location_by_key(current_key)
