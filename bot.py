@@ -8,7 +8,7 @@ from collections import Counter, defaultdict
 
 from dotenv import load_dotenv
 from openai import OpenAI
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 load_dotenv()
@@ -1030,6 +1030,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/khvoynaya\n"
         "/lyubytino"
     )
+
+
+BOT_COMMANDS = [
+    BotCommand("start", "помощь и список команд"),
+    BotCommand("status", "статус бота, API, профиля и learning"),
+    BotCommand("weather", "текущая погода для home или города"),
+    BotCommand("home", "погода по твоей домашней локации"),
+    BotCommand("today_parts", "сегодня по частям дня"),
+    BotCommand("tomorrow", "подробный прогноз на завтра"),
+    BotCommand("tomorrow_parts", "завтра по частям дня"),
+    BotCommand("weekend", "прогноз на ближайшие выходные"),
+    BotCommand("locations", "список избранных локаций"),
+    BotCommand("set_home", "выбрать домашнюю локацию"),
+    BotCommand("profile", "персональные настройки рекомендаций"),
+    BotCommand("morning_on", "включить утренний брифинг"),
+    BotCommand("morning_off", "выключить утренний брифинг"),
+    BotCommand("morning_time", "задать время утреннего брифинга"),
+    BotCommand("morning_now", "получить утренний брифинг сейчас"),
+    BotCommand("learning_on", "включить авто-обучение"),
+    BotCommand("learning_off", "выключить авто-обучение"),
+    BotCommand("learning_status", "статус авто-обучения"),
+    BotCommand("learning_add", "добавить локацию в авто-обучение"),
+    BotCommand("learning_remove", "убрать локацию из авто-обучения"),
+    BotCommand("learning_locations", "локации авто-обучения"),
+    BotCommand("learning_now", "сохранить learning-прогноз сейчас"),
+    BotCommand("learning_verify_now", "проверить learning-прогнозы сейчас"),
+    BotCommand("scores", "точность моделей по температуре"),
+    BotCommand("rain_scores", "точность моделей по дождю"),
+    BotCommand("adaptive", "текущие адаптивные веса моделей"),
+    BotCommand("history", "последние сохранённые прогнозы"),
+    BotCommand("analyze", "анализ истории прогнозов"),
+    BotCommand("verify", "проверить последний прогноз температуры"),
+    BotCommand("verify_rain", "проверить последний прогноз дождя"),
+]
+
+
+async def setup_bot_commands(app):
+    await app.bot.set_my_commands(BOT_COMMANDS)
+    print("Telegram command menu updated")
 
 
 async def weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2655,7 +2694,7 @@ def main():
     if not TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).post_init(setup_bot_commands).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
