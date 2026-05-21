@@ -77,11 +77,19 @@ FAVORITE_LOCATIONS = {
     "kalyazin": {"latitude": 57.2404, "longitude": 37.8563, "name": "Калязин", "country": "Россия", "region_type": "lake"},
     "khvoynaya": {"latitude": 58.9000, "longitude": 34.5333, "name": "Хвойная", "country": "Россия", "region_type": "north"},
     "lyubytino": {"latitude": 58.8119, "longitude": 33.3922, "name": "Любытино", "country": "Россия", "region_type": "north"},
+    "moscow_ilya": {"latitude": 55.873819, "longitude": 37.610251, "name": "Москва Илья", "country": "Россия", "region_type": "urban"},
+    "moscow_center": {"latitude": 55.7558, "longitude": 37.6176, "name": "Москва Центр", "country": "Россия", "region_type": "urban"},
+    "moscow_north": {"latitude": 55.8800, "longitude": 37.5500, "name": "Москва Север", "country": "Россия", "region_type": "urban"},
+    "moscow_south": {"latitude": 55.6200, "longitude": 37.6500, "name": "Москва Юг", "country": "Россия", "region_type": "urban"},
+    "moscow_west": {"latitude": 55.7400, "longitude": 37.4200, "name": "Москва Запад", "country": "Россия", "region_type": "urban"},
+    "moscow_east": {"latitude": 55.7800, "longitude": 37.8200, "name": "Москва Восток", "country": "Россия", "region_type": "urban"},
 }
 
 REGION_WEIGHTS = {
     "moscow": {"openmeteo": 0.30, "weatherapi": 0.30, "visualcrossing": 0.20, "yr": 0.10, "meteosource": 0.10},
+    "urban": {"openmeteo": 0.30, "weatherapi": 0.30, "visualcrossing": 0.20, "yr": 0.10, "meteosource": 0.10},
     "north": {"openmeteo": 0.30, "weatherapi": 0.10, "visualcrossing": 0.20, "yr": 0.35, "meteosource": 0.05},
+    "forest": {"openmeteo": 0.30, "weatherapi": 0.10, "visualcrossing": 0.20, "yr": 0.35, "meteosource": 0.05},
     "lake": {"openmeteo": 0.30, "weatherapi": 0.15, "visualcrossing": 0.20, "yr": 0.30, "meteosource": 0.05},
     "mixed": {"openmeteo": 0.25, "weatherapi": 0.25, "visualcrossing": 0.20, "yr": 0.20, "meteosource": 0.10},
 }
@@ -782,6 +790,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Локации:\n"
         "/home\n"
         "/moscow\n"
+        "/moscow_ilya\n"
         "/sergiev\n"
         "/kalyazin\n"
         "/khvoynaya\n"
@@ -1711,6 +1720,7 @@ def main():
 
     app.add_handler(CommandHandler("home", lambda update, context: favorite_current(update, context, "home")))
     app.add_handler(CommandHandler("moscow", lambda update, context: favorite_current(update, context, "moscow")))
+    app.add_handler(CommandHandler("moscow_ilya", lambda update, context: favorite_current(update, context, "moscow_ilya")))
     app.add_handler(CommandHandler("sergiev", lambda update, context: favorite_current(update, context, "sergiev")))
     app.add_handler(CommandHandler("kalyazin", lambda update, context: favorite_current(update, context, "kalyazin")))
     app.add_handler(CommandHandler("khvoynaya", lambda update, context: favorite_current(update, context, "khvoynaya")))
