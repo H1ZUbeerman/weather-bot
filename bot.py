@@ -13,13 +13,17 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 load_dotenv()
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEATHERAPI_KEY = os.getenv("WEATHERAPI_KEY")
-VISUALCROSSING_API_KEY = os.getenv("VISUALCROSSING_API_KEY")
-METEOSOURCE_API_KEY = os.getenv("METEOSOURCE_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+def get_env_value(name):
+    value = os.getenv(name)
+    return value.strip() if value else None
+
+
+TOKEN = get_env_value("TELEGRAM_BOT_TOKEN")
+WEATHERAPI_KEY = get_env_value("WEATHERAPI_KEY")
+VISUALCROSSING_API_KEY = get_env_value("VISUALCROSSING_API_KEY")
+METEOSOURCE_API_KEY = get_env_value("METEOSOURCE_API_KEY")
+OPENAI_API_KEY = get_env_value("OPENAI_API_KEY")
 
 HISTORY_FILE = "weather_history.json"
 SCORES_FILE = "model_scores.json"
@@ -54,6 +58,13 @@ def update_user_setting(chat_id, key, value):
 
     data[chat_key][key] = value
     save_user_settings(data)
+
+
+def get_home_location_for_chat(chat_id):
+    user_settings = get_user_settings(chat_id)
+    home_key = user_settings.get("home_location_key", "home")
+    return get_location_by_key(home_key)
+
 
 def get_location_by_key(location_key):
     return FAVORITE_LOCATIONS.get(location_key, FAVORITE_LOCATIONS["home"])
@@ -302,6 +313,11 @@ def get_weights_for_location(location):
 
 def get_ai_summary(prompt):
     try:
+        if not OPENAI_API_KEY:
+            return "AI summary недоступен: отсутствует OPENAI_API_KEY"
+
+        client = OpenAI(api_key=OPENAI_API_KEY)
+
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -346,8 +362,11 @@ def get_city_coordinates(city):
     }
 
 
-def get_location(context, default_key="home"):
+def get_location(context, default_key="home", chat_id=None):
     if not context.args:
+        if default_key == "home" and chat_id is not None:
+            return get_home_location_for_chat(chat_id)
+
         return FAVORITE_LOCATIONS[default_key]
 
     key = context.args[0].lower()
@@ -771,7 +790,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context)
+    location = get_location(context, chat_id=update.effective_chat.id)
 
     if not location:
         await update.message.reply_text("Локация не найдена 😢")
@@ -860,7 +879,7 @@ Consensus:
 
 
 async def today_parts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context)
+    location = get_location(context, chat_id=update.effective_chat.id)
 
     if not location:
         await update.message.reply_text("Локация не найдена 😢")
@@ -914,7 +933,7 @@ async def today_parts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def tomorrow_parts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context)
+    location = get_location(context, chat_id=update.effective_chat.id)
 
     if not location:
         await update.message.reply_text("Локация не найдена 😢")
@@ -970,7 +989,7 @@ async def tomorrow_parts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def tomorrow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context)
+    location = get_location(context, chat_id=update.effective_chat.id)
 
     if not location:
         await update.message.reply_text("Локация не найдена 😢")
@@ -1093,7 +1112,7 @@ async def tomorrow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message)
 
 async def weekend(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context)
+    location = get_location(context, chat_id=update.effective_chat.id)
 
     if not location:
         await update.message.reply_text("Локация не найдена 😢")
@@ -1668,6 +1687,9 @@ async def set_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    if not TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
+
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))

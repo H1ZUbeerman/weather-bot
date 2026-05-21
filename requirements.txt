@@ -1,5 +1,5 @@
-python-telegram-bot[job-queue]
-requests
-python-dotenv
-openai
-geopy
+python-telegram-bot[job-queue]==22.5
+requests==2.32.5
+python-dotenv==1.2.1
+openai==2.37.0
+geopy==2.4.1
