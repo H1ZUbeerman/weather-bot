@@ -723,7 +723,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/verify_rain\n"
         "/scores\n"
         "/rain_scores\n"
-        "/adaptive\n\n"
+        "/adaptive\n"
+        "/status\n\n"
         "Локации:\n"
         "/home\n"
         "/moscow\n"
@@ -1471,6 +1472,106 @@ async def adaptive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message)
 
 
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    history_items = load_history()
+    scores_data = load_scores()
+    rain_scores_data = load_rain_scores()
+    adaptive_weights = get_adaptive_weights_from_scores()
+
+    total_temp_checks = sum(
+        data.get("checks", 0)
+        for model, data in scores_data.items()
+        if model != "consensus"
+    )
+
+    total_rain_checks = sum(
+        data.get("checks", 0)
+        for model, data in rain_scores_data.items()
+        if model != "consensus"
+    )
+
+    best_temp_model = "нет данных"
+
+    model_avg_errors = {}
+
+    for model, data in scores_data.items():
+        if model == "consensus":
+            continue
+
+        checks = data.get("checks", 0)
+
+        if checks > 0:
+            model_avg_errors[model] = data.get("total_error", 0) / checks
+
+    if model_avg_errors:
+        best_temp_model = min(model_avg_errors, key=model_avg_errors.get)
+
+    best_rain_model = "нет данных"
+
+    rain_avg_errors = {}
+
+    for model, data in rain_scores_data.items():
+        if model == "consensus":
+            continue
+
+        checks = data.get("checks", 0)
+
+        if checks > 0:
+            rain_avg_errors[model] = data.get("total_error", 0) / checks
+
+    if rain_avg_errors:
+        best_rain_model = min(rain_avg_errors, key=rain_avg_errors.get)
+
+    locations_list = ", ".join(FAVORITE_LOCATIONS.keys())
+
+    if adaptive_weights:
+        weights_text = "\n".join(
+            [f"• {model}: {weight}" for model, weight in adaptive_weights.items()]
+        )
+        weights_mode = "adaptive"
+    else:
+        weights_text = "Пока используются региональные веса."
+        weights_mode = "regional"
+
+    message = (
+        f"🧠 Статус AI Weather Assistant\n\n"
+
+        f"☁️ Режим работы:\n"
+        f"✅ Cloud / Render\n"
+        f"✅ Telegram polling active\n\n"
+
+        f"📍 Локации:\n"
+        f"Всего: {len(FAVORITE_LOCATIONS)}\n"
+        f"{locations_list}\n\n"
+
+        f"📚 История прогнозов:\n"
+        f"Сохранено: {len(history_items)}\n\n"
+
+        f"📊 Проверки моделей:\n"
+        f"🌡 Temperature checks: {total_temp_checks}\n"
+        f"☔ Rain checks: {total_rain_checks}\n\n"
+
+        f"🏆 Лучшие модели:\n"
+        f"🌡 Temperature: {best_temp_model}\n"
+        f"☔ Rain: {best_rain_model}\n\n"
+
+        f"⚙️ Веса:\n"
+        f"Режим: {weights_mode}\n"
+        f"{weights_text}\n\n"
+
+        f"🧩 Основные команды:\n"
+        f"/weather — текущая погода\n"
+        f"/tomorrow — завтра с частями дня\n"
+        f"/today_parts — сегодня по частям дня\n"
+        f"/weekend — выходные\n"
+        f"/history — история\n"
+        f"/scores — точность моделей\n"
+        f"/adaptive — adaptive weights"
+    )
+
+    await update.message.reply_text(message)
+
+
 async def favorite_current(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str):
     context.args = [key]
     await weather(update, context)
@@ -1480,6 +1581,7 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("weather", weather))
     app.add_handler(CommandHandler("today_parts", today_parts))
     app.add_handler(CommandHandler("tomorrow_parts", tomorrow_parts))
