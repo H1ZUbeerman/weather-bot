@@ -1,29 +1,13 @@
 import os
 import json
 import requests
-from ai_layer.reasoning import *
-from storage.user_settings import get_user_settings, update_user_setting
-from weather.messages import *
-from outdoor.messages import *
-from outdoor.advisors import *
-from outdoor.scoring import *
-from core.scheduler import *
-from weather.learning import *
-from weather.alerts import *
-from weather.providers import get_openmeteo_current, get_weatherapi_current, get_visualcrossing_current, get_yr_current, get_meteosource_current
-from weather.locations import *
-from weather.consensus import weighted_average, calculate_confidence, rain_score_from_mm
-from ai_layer.summaries import get_ai_summary
-from core.config import *
-from storage.json_storage import load_json_file, save_json_file
 from pathlib import Path
-from datetime import datetime, timedelta, time
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta
 from collections import Counter, defaultdict
 
 from dotenv import load_dotenv
 from openai import OpenAI
-from telegram import Update, BotCommand
+from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 load_dotenv()
@@ -36,8 +20,18 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+HISTORY_FILE = "weather_history.json"
+SCORES_FILE = "model_scores.json"
+RAIN_SCORES_FILE = "rain_scores.json"
 
-
+FAVORITE_LOCATIONS = {
+    "home": {"latitude": 55.904068, "longitude": 37.640018, "name": "Дом", "country": "Россия", "region_type": "moscow"},
+    "moscow": {"latitude": 55.7558, "longitude": 37.6173, "name": "Москва", "country": "Россия", "region_type": "moscow"},
+    "sergiev": {"latitude": 56.3063, "longitude": 38.1506, "name": "Сергиев Посад", "country": "Россия", "region_type": "mixed"},
+    "kalyazin": {"latitude": 57.2404, "longitude": 37.8563, "name": "Калязин", "country": "Россия", "region_type": "lake"},
+    "khvoynaya": {"latitude": 58.9000, "longitude": 34.5333, "name": "Хвойная", "country": "Россия", "region_type": "north"},
+    "lyubytino": {"latitude": 58.8119, "longitude": 33.3922, "name": "Любытино", "country": "Россия", "region_type": "north"},
+}
 
 REGION_WEIGHTS = {
     "moscow": {"openmeteo": 0.30, "weatherapi": 0.30, "visualcrossing": 0.20, "yr": 0.10, "meteosource": 0.10},
@@ -70,6 +64,35 @@ DAY_PARTS = {
 }
 
 
+def load_json_file(filename, default):
+    path = Path(filename)
+    if not path.exists():
+        return default
+    with open(filename, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_json_file(filename, data):
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def weighted_average(values, weights):
+    total = 0
+    total_weight = 0
+
+    for key, value in values.items():
+        if value is not None:
+            weight = weights.get(key, 0)
+            total += value * weight
+            total_weight += weight
+
+    if total_weight == 0:
+        return 0
+
+    return round(total / total_weight, 1)
+
+
 def simple_average(values):
     values = [v for v in values if v is not None]
     if not values:
@@ -77,45 +100,26 @@ def simple_average(values):
     return round(sum(values) / len(values), 1)
 
 
-def get_user_home_location_key(chat_id):
-    user_settings = get_user_settings(chat_id)
-    return user_settings.get("home_location_key", "home")
+def calculate_confidence(spread, good_limit, medium_limit):
+    if spread <= good_limit:
+        return "высокая"
+    if spread <= medium_limit:
+        return "средняя"
+    return "низкая"
 
 
-def get_user_home_location(chat_id):
-    home_key = get_user_home_location_key(chat_id)
-    return FAVORITE_LOCATIONS.get(home_key, FAVORITE_LOCATIONS["home"])
-
-
-def get_user_morning_time(chat_id):
-    user_settings = get_user_settings(chat_id)
-    return user_settings.get("morning_time", "08:00")
-
-
-def get_user_timezone(chat_id):
-    user_settings = get_user_settings(chat_id)
-    return user_settings.get("timezone", "Europe/Moscow")
-
-
-def get_location(context, default_key="home"):
-    if not context.args:
-        if default_key == "home":
-            chat_id = getattr(context, "_chat_id", None)
-
-            if chat_id:
-                return get_user_home_location(chat_id)
-
-            return FAVORITE_LOCATIONS["home"]
-
-        return FAVORITE_LOCATIONS[default_key]
-
-    key = context.args[0].lower()
-
-    if key in FAVORITE_LOCATIONS:
-        return FAVORITE_LOCATIONS[key]
-
-    return get_city_coordinates(" ".join(context.args))
-
+def rain_score_from_mm(mm):
+    if mm is None:
+        return 0
+    if mm >= 5:
+        return 90
+    if mm >= 2:
+        return 70
+    if mm >= 0.5:
+        return 45
+    if mm > 0:
+        return 25
+    return 0
 
 
 def save_forecast_history(location_name, forecast_data):
@@ -132,257 +136,110 @@ def load_history():
     return load_json_file(HISTORY_FILE, [])
 
 
-def load_morning_subscribers():
-    return load_json_file(MORNING_SUBSCRIBERS_FILE, [])
-
-
-def save_morning_subscribers(subscribers):
-    save_json_file(MORNING_SUBSCRIBERS_FILE, subscribers)
-
-
-def add_morning_subscriber(chat_id, location_key="home"):
-    subscribers = load_morning_subscribers()
-    chat_id = str(chat_id)
-
-    updated = False
-
-    for subscriber in subscribers:
-        if str(subscriber.get("chat_id")) == chat_id:
-            subscriber["location_key"] = location_key
-            updated = True
-            break
-
-    if not updated:
-        subscribers.append({
-            "chat_id": chat_id,
-            "location_key": location_key,
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        })
-
-    save_morning_subscribers(subscribers)
-
-
-def remove_morning_subscriber(chat_id):
-    subscribers = load_morning_subscribers()
-    chat_id = str(chat_id)
-
-    subscribers = [
-        subscriber for subscriber in subscribers
-        if str(subscriber.get("chat_id")) != chat_id
-    ]
-
-    save_morning_subscribers(subscribers)
-
-
-
-
-
-
-
-
-
-
-LOCATION_MODEL_SCORES_FILE = "location_model_scores.json"
-
-
-def get_location_key_from_location(location):
-    for key, favorite_location in FAVORITE_LOCATIONS.items():
-        if (
-            favorite_location.get("name") == location.get("name")
-            and round(float(favorite_location.get("latitude")), 4) == round(float(location.get("latitude")), 4)
-            and round(float(favorite_location.get("longitude")), 4) == round(float(location.get("longitude")), 4)
-        ):
-            return key
-
-    for key, favorite_location in FAVORITE_LOCATIONS.items():
-        if favorite_location.get("name") == location.get("name"):
-            return key
-
-    return None
-
-
-def default_location_model_scores():
-    return {
-        "temperature": {
-            "openmeteo": {"checks": 0, "total_error": 0, "wins": 0},
-            "weatherapi": {"checks": 0, "total_error": 0, "wins": 0},
-            "visualcrossing": {"checks": 0, "total_error": 0, "wins": 0},
-            "yr": {"checks": 0, "total_error": 0, "wins": 0},
-            "meteosource": {"checks": 0, "total_error": 0, "wins": 0},
-            "consensus": {"checks": 0, "total_error": 0, "wins": 0},
-        },
-        "rain": {
-            "openmeteo": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
-            "weatherapi": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
-            "visualcrossing": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
-            "yr": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
-            "meteosource": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
-            "consensus": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
-        },
-        "wind": {
-            "openmeteo": {"checks": 0, "total_error": 0, "wins": 0},
-            "weatherapi": {"checks": 0, "total_error": 0, "wins": 0},
-            "visualcrossing": {"checks": 0, "total_error": 0, "wins": 0},
-            "yr": {"checks": 0, "total_error": 0, "wins": 0},
-            "meteosource": {"checks": 0, "total_error": 0, "wins": 0},
-            "consensus": {"checks": 0, "total_error": 0, "wins": 0},
-        },
+def load_scores():
+    default_scores = {
+        "openmeteo": {"checks": 0, "total_error": 0, "wins": 0},
+        "weatherapi": {"checks": 0, "total_error": 0, "wins": 0},
+        "visualcrossing": {"checks": 0, "total_error": 0, "wins": 0},
+        "yr": {"checks": 0, "total_error": 0, "wins": 0},
+        "meteosource": {"checks": 0, "total_error": 0, "wins": 0},
+        "consensus": {"checks": 0, "total_error": 0, "wins": 0},
     }
 
+    scores = load_json_file(SCORES_FILE, default_scores)
 
-def load_location_model_scores():
-    return load_json_file(LOCATION_MODEL_SCORES_FILE, {})
+    for key in default_scores:
+        if key not in scores:
+            scores[key] = default_scores[key]
 
-
-def save_location_model_scores(data):
-    save_json_file(LOCATION_MODEL_SCORES_FILE, data)
-
-
-def ensure_location_scores(data, location_key):
-    if location_key not in data:
-        data[location_key] = default_location_model_scores()
-
-    default_scores = default_location_model_scores()
-
-    for section, models in default_scores.items():
-        if section not in data[location_key]:
-            data[location_key][section] = models
-
-        for model, model_defaults in models.items():
-            if model not in data[location_key][section]:
-                data[location_key][section][model] = model_defaults
-
-            for metric_key, metric_value in model_defaults.items():
-                if metric_key not in data[location_key][section][model]:
-                    data[location_key][section][model][metric_key] = metric_value
-
-    return data
+    return scores
 
 
-def update_error_scores_for_section(section_scores, errors, consensus_error):
+def save_scores(scores):
+    save_json_file(SCORES_FILE, scores)
+
+
+def update_model_scores(errors, consensus_error):
+    scores = load_scores()
     all_errors = dict(errors)
     all_errors["consensus"] = consensus_error
-
     best_model = min(all_errors, key=all_errors.get)
 
     for model, error in all_errors.items():
-        if model not in section_scores:
-            continue
-
-        section_scores[model]["checks"] += 1
-        section_scores[model]["total_error"] += error
-
+        scores[model]["checks"] += 1
+        scores[model]["total_error"] += error
         if model == best_model:
-            section_scores[model]["wins"] += 1
+            scores[model]["wins"] += 1
 
+    save_scores(scores)
     return best_model
 
 
-def update_location_rain_scores(section_scores, predictions, factual_rain_score):
+def load_rain_scores():
+    default_scores = {
+        "openmeteo": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
+        "weatherapi": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
+        "visualcrossing": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
+        "yr": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
+        "meteosource": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
+        "consensus": {"checks": 0, "correct": 0, "false_positive": 0, "missed": 0, "total_error": 0},
+    }
+
+    scores = load_json_file(RAIN_SCORES_FILE, default_scores)
+
+    for key in default_scores:
+        if key not in scores:
+            scores[key] = default_scores[key]
+
+    return scores
+
+
+def save_rain_scores(scores):
+    save_json_file(RAIN_SCORES_FILE, scores)
+
+
+def update_rain_scores(predictions, factual_rain_score):
+    scores = load_rain_scores()
     fact_is_rain = factual_rain_score >= 25
 
     for model, predicted_score in predictions.items():
-        if model not in section_scores:
-            continue
-
         predicted_is_rain = predicted_score >= 30
-
-        section_scores[model]["checks"] += 1
-        section_scores[model]["total_error"] += abs(predicted_score - factual_rain_score)
+        scores[model]["checks"] += 1
+        scores[model]["total_error"] += abs(predicted_score - factual_rain_score)
 
         if predicted_is_rain == fact_is_rain:
-            section_scores[model]["correct"] += 1
+            scores[model]["correct"] += 1
         elif predicted_is_rain and not fact_is_rain:
-            section_scores[model]["false_positive"] += 1
+            scores[model]["false_positive"] += 1
         elif not predicted_is_rain and fact_is_rain:
-            section_scores[model]["missed"] += 1
+            scores[model]["missed"] += 1
+
+    save_rain_scores(scores)
 
 
-def update_location_model_scores(location_key, temp_errors, consensus_temp_error, wind_errors, consensus_wind_error, rain_predictions, factual_rain_score):
-    if not location_key:
-        return None
+def get_adaptive_weights_from_scores():
+    scores_data = load_scores()
+    source_scores = {k: v for k, v in scores_data.items() if k != "consensus"}
 
-    data = load_location_model_scores()
-    data = ensure_location_scores(data, location_key)
-
-    best_temp_model = update_error_scores_for_section(
-        data[location_key]["temperature"],
-        temp_errors,
-        consensus_temp_error,
-    )
-
-    best_wind_model = update_error_scores_for_section(
-        data[location_key]["wind"],
-        wind_errors,
-        consensus_wind_error,
-    )
-
-    if rain_predictions:
-        update_location_rain_scores(
-            data[location_key]["rain"],
-            rain_predictions,
-            factual_rain_score,
-        )
-
-    save_location_model_scores(data)
-
-    return {
-        "best_temp_model": best_temp_model,
-        "best_wind_model": best_wind_model,
-    }
-
-
-def calculate_location_adaptive_weights(location_key):
-    data = load_location_model_scores()
-
-    if location_key not in data:
-        return None
-
-    scores = data[location_key]
-    models = ["openmeteo", "weatherapi", "visualcrossing", "yr", "meteosource"]
-
-    total_checks = sum(scores.get("temperature", {}).get(model, {}).get("checks", 0) for model in models)
-
-    if total_checks == 0:
+    if all(v["checks"] == 0 for v in source_scores.values()):
         return None
 
     quality = {}
 
-    for model in models:
-        temp_data = scores["temperature"].get(model, {})
-        wind_data = scores["wind"].get(model, {})
-        rain_data = scores["rain"].get(model, {})
+    for model, data in source_scores.items():
+        checks = data["checks"]
+        total_error = data["total_error"]
+        wins = data["wins"]
 
-        temp_checks = temp_data.get("checks", 0)
-        wind_checks = wind_data.get("checks", 0)
-        rain_checks = rain_data.get("checks", 0)
+        if checks == 0:
+            quality[model] = 0.01
+            continue
 
-        temp_quality = 0.01
-        wind_quality = 0.01
-        rain_quality = 0.01
-
-        if temp_checks > 0:
-            avg_temp_error = temp_data.get("total_error", 0) / temp_checks
-            temp_win_rate = temp_data.get("wins", 0) / temp_checks
-            temp_quality = (1 / (avg_temp_error + 0.1)) + (temp_win_rate * 0.3)
-
-        if wind_checks > 0:
-            avg_wind_error = wind_data.get("total_error", 0) / wind_checks
-            wind_win_rate = wind_data.get("wins", 0) / wind_checks
-            wind_quality = (1 / ((avg_wind_error / 5) + 0.1)) + (wind_win_rate * 0.2)
-
-        if rain_checks > 0:
-            avg_rain_error = rain_data.get("total_error", 0) / rain_checks
-            rain_accuracy = rain_data.get("correct", 0) / rain_checks
-            rain_quality = (1 / ((avg_rain_error / 20) + 0.1)) + (rain_accuracy * 0.5)
-
-        # Температура важнее всего, потом осадки, потом ветер.
-        quality[model] = (temp_quality * 0.55) + (rain_quality * 0.30) + (wind_quality * 0.15)
+        avg_error = total_error / checks
+        win_rate = wins / checks
+        quality[model] = (1 / (avg_error + 0.1)) + (win_rate * 0.3)
 
     total_quality = sum(quality.values())
-
-    if total_quality <= 0:
-        return None
 
     adaptive_weights = {
         model: round(score / total_quality, 2)
@@ -398,22 +255,79 @@ def calculate_location_adaptive_weights(location_key):
     return adaptive_weights
 
 
-
-
 def get_weights_for_location(location):
-    location_key = get_location_key_from_location(location)
-    location_weights = calculate_location_adaptive_weights(location_key) if location_key else None
-
-    if location_weights:
-        return location_weights, f"adaptive_location:{location_key}"
-
     adaptive_weights = get_adaptive_weights_from_scores()
 
     if adaptive_weights:
-        return adaptive_weights, "adaptive_global"
+        return adaptive_weights, "adaptive"
 
-    region_type = location.get("region_type", "mixed")
-    return REGION_WEIGHTS.get(region_type, REGION_WEIGHTS["mixed"]), f"regional:{region_type}"
+    region_type = location["region_type"]
+    return REGION_WEIGHTS[region_type], f"regional:{region_type}"
+
+
+def get_ai_summary(prompt):
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты AI weather assistant. "
+                        "Пиши кратко и полезно. "
+                        "Давай рекомендации человеку: одежда, зонт, ветер, надежность прогноза."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.4,
+        )
+
+        return response.choices[0].message.content.strip()
+
+    except Exception as e:
+        return f"AI недоступен: {e}"
+
+
+def get_city_coordinates(city):
+    url = (
+        "https://geocoding-api.open-meteo.com/v1/search"
+        f"?name={city}&count=1&language=ru&format=json"
+    )
+
+    data = requests.get(url).json()
+
+    if "results" not in data:
+        return None
+
+    location = data["results"][0]
+
+    return {
+        "latitude": location["latitude"],
+        "longitude": location["longitude"],
+        "name": location["name"],
+        "country": location.get("country", ""),
+        "region_type": "mixed",
+    }
+
+
+def get_location(context, default_key="home"):
+    if not context.args:
+        return FAVORITE_LOCATIONS[default_key]
+
+    key = context.args[0].lower()
+
+    if key in FAVORITE_LOCATIONS:
+        return FAVORITE_LOCATIONS[key]
+
+    return get_city_coordinates(" ".join(context.args))
+
+
+def get_location_by_name(location_name):
+    for loc in FAVORITE_LOCATIONS.values():
+        if loc["name"] == location_name:
+            return loc
+    return None
 
 
 def get_yr_data(lat, lon):
@@ -452,35 +366,84 @@ def get_meteosource_data(lat, lon, sections="current"):
 
 
 def get_current_sources(location):
-    openmeteo = get_openmeteo_current(location)
+    lat = location["latitude"]
+    lon = location["longitude"]
 
-    om_temp = openmeteo["temperature"]
-    om_wind = openmeteo["wind"]
-    om_rain = openmeteo["rain"]
+    om_data = requests.get(
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat}"
+        f"&longitude={lon}"
+        "&current=temperature_2m,wind_speed_10m,precipitation"
+    ).json()
 
-    weatherapi = get_weatherapi_current(location, WEATHERAPI_KEY)
+    om_current = om_data["current"]
+    om_temp = om_current["temperature_2m"]
+    om_wind = om_current["wind_speed_10m"]
+    om_rain = rain_score_from_mm(om_current.get("precipitation", 0))
 
-    wa_temp = weatherapi["temperature"]
-    wa_wind = weatherapi["wind"]
-    wa_rain = weatherapi["rain"]
+    wa_data = requests.get(
+        "https://api.weatherapi.com/v1/current.json"
+        f"?key={WEATHERAPI_KEY}"
+        f"&q={lat},{lon}&aqi=no"
+    ).json()
 
-    visualcrossing = get_visualcrossing_current(location, VISUALCROSSING_API_KEY)
+    wa_current = wa_data["current"]
+    wa_temp = wa_current["temp_c"]
+    wa_wind = wa_current["wind_kph"]
+    wa_rain = rain_score_from_mm(wa_current.get("precip_mm", 0))
 
-    vc_temp = visualcrossing["temperature"]
-    vc_wind = visualcrossing["wind"]
-    vc_rain = visualcrossing["rain"]
+    vc_data = requests.get(
+        "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/"
+        f"{lat},{lon}"
+        f"?unitGroup=metric"
+        f"&key={VISUALCROSSING_API_KEY}"
+        "&include=current"
+    ).json()
 
-    yr = get_yr_current(location)
+    vc_current = vc_data["currentConditions"]
+    vc_temp = vc_current["temp"]
+    vc_wind = vc_current["windspeed"]
 
-    yr_temp = yr["temperature"]
-    yr_wind = yr["wind"]
-    yr_rain = yr["rain"]
+    vc_rain = vc_current.get("precipprob")
+    if vc_rain is None:
+        vc_rain = rain_score_from_mm(vc_current.get("precip", 0))
 
-    meteosource = get_meteosource_current(location, METEOSOURCE_API_KEY)
+    yr_data = get_yr_data(lat, lon)
 
-    ms_temp = meteosource["temperature"]
-    ms_wind = meteosource["wind"]
-    ms_rain = meteosource["rain"]
+    if not yr_data:
+        raise ValueError("yr.no ошибка")
+
+    yr_item = yr_data["properties"]["timeseries"][0]
+    yr_now = yr_item["data"]["instant"]["details"]
+
+    yr_temp = yr_now["air_temperature"]
+    yr_wind = round(yr_now["wind_speed"] * 3.6, 1)
+
+    yr_next_1h = yr_item["data"].get("next_1_hours", {})
+    yr_precip_mm = yr_next_1h.get("details", {}).get("precipitation_amount", 0)
+    yr_rain = rain_score_from_mm(yr_precip_mm)
+
+    ms_data = get_meteosource_data(lat, lon, "current")
+
+    if not ms_data:
+        raise ValueError("Meteosource ошибка")
+
+    ms_current = ms_data.get("current", {})
+    ms_temp = ms_current.get("temperature")
+
+    wind_data = ms_current.get("wind", {})
+
+    if isinstance(wind_data, dict):
+        ms_wind = wind_data.get("speed")
+    else:
+        ms_wind = ms_current.get("wind_speed")
+
+    ms_precipitation = ms_current.get("precipitation", 0)
+
+    if isinstance(ms_precipitation, dict):
+        ms_rain = rain_score_from_mm(ms_precipitation.get("total", 0))
+    else:
+        ms_rain = rain_score_from_mm(ms_precipitation)
 
     return {
         "temperatures": {
@@ -745,566 +708,15 @@ def build_consensus(location, sources):
     }
 
 
-def get_severity_emoji(rain, wind):
-    if rain >= 70 or wind >= 35:
-        return "🔴"
-    if rain >= 50 or wind >= 25:
-        return "🟠"
-    if rain >= 25 or wind >= 18:
-        return "🟡"
-    return "🟢"
-
-
-def get_best_part(parts):
-    best_key = None
-    best_score = None
-
-    for key, part in parts.items():
-        temp = part.get("temp", 0)
-        rain = part.get("rain", 0)
-        wind = part.get("wind", 0)
-
-        comfort_score = 100
-
-        comfort_score -= rain * 0.7
-        comfort_score -= max(0, wind - 12) * 1.5
-        comfort_score -= abs(temp - 20) * 1.2
-
-        if best_score is None or comfort_score > best_score:
-            best_score = comfort_score
-            best_key = key
-
-    return best_key, round(best_score, 1)
-
-
-def build_alerts_from_parts(parts):
-    alerts = []
-
-    for key in ["morning", "day", "evening", "night"]:
-        part = parts.get(key, {})
-        title = part.get("title", key)
-        rain = part.get("rain", 0)
-        wind = part.get("wind", 0)
-        temp = part.get("temp", 0)
-
-        if rain >= 70:
-            alerts.append(f"🔴 {title}: высокий риск дождя — ~{rain}%")
-        elif rain >= 50:
-            alerts.append(f"🟠 {title}: заметный риск дождя — ~{rain}%")
-        elif rain >= 25:
-            alerts.append(f"🟡 {title}: возможны осадки — ~{rain}%")
-
-        if wind >= 35:
-            alerts.append(f"🔴 {title}: сильный ветер — до ~{wind} км/ч")
-        elif wind >= 25:
-            alerts.append(f"🟠 {title}: ощутимый ветер — до ~{wind} км/ч")
-
-        if temp <= 5:
-            alerts.append(f"🔵 {title}: холодно — ~{temp}°C")
-        elif temp >= 28:
-            alerts.append(f"🟠 {title}: жарко — ~{temp}°C")
-
-    if not alerts:
-        alerts.append("🟢 Серьёзных погодных рисков не видно.")
-
-    return alerts
-
-
-def load_learning_forecasts():
-    return load_json_file(LEARNING_FILE, [])
-
-
-def save_learning_forecasts(items):
-    save_json_file(LEARNING_FILE, items)
-
-
-def save_auto_learning_forecast(location, location_key=None):
-    current = get_current_sources(location)
-    c = build_consensus(location, current)
-
-    if location_key is None:
-        location_key = get_home_location_key()
-
-    item = {
-        "id": f"{location_key}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "location": location["name"],
-        "location_key": location_key,
-        "forecast": {
-            "region_type": location["region_type"],
-            "temperatures": {**c["temp_values"], "consensus": c["avg_temp"]},
-            "winds": {**c["wind_values"], "consensus": c["avg_wind"]},
-            "rain": {**c["rain_values"], "consensus": c["avg_rain"]},
-            "weights_used": c["weights"],
-            "weights_mode": c["weights_mode"],
-            "temperature_confidence": c["temp_confidence"],
-            "rain_confidence": c["rain_confidence"],
-            "confidence": c["temp_confidence"],
-            "spread": c["temp_spread"],
-            "rain_spread": c["rain_spread"],
-        },
-        "verified": False,
-        "verified_at": None,
-        "temperature_errors": None,
-        "rain_errors": None,
-    }
-
-    items = load_learning_forecasts()
-    items.append(item)
-    save_learning_forecasts(items)
-
-    # Также сохраняем в общую историю, чтобы /history и /analyze видели авто-прогнозы.
-    save_forecast_history(location["name"], item["forecast"])
-
-    return item
-
-
-def save_auto_learning_forecasts_for_all_locations():
-    created_items = []
-
-    for location_key, location in FAVORITE_LOCATIONS.items():
-        try:
-            item = save_auto_learning_forecast(location, location_key)
-            created_items.append(item)
-        except Exception:
-            continue
-
-    return created_items
-
-
-def verify_auto_learning_forecast(item):
-    location_key = item.get("location_key")
-    location = get_location_by_key(location_key) if location_key else None
-
-    if not location:
-        location = get_location_by_name(item["location"])
-
-    if not location:
-        raise ValueError(f"Не найдена локация: {item['location']}")
-
-    current = get_current_sources(location)
-
-    current_temp_values = current["temperatures"]
-    factual_temp = round(sum(current_temp_values.values()) / len(current_temp_values), 1)
-
-    saved_temps = item["forecast"]["temperatures"]
-
-    temp_errors = {}
-
-    for source, predicted_temp in saved_temps.items():
-        if source == "consensus":
-            continue
-
-        temp_errors[source] = round(abs(predicted_temp - factual_temp), 1)
-
-    consensus_temp_error = round(abs(saved_temps["consensus"] - factual_temp), 1)
-    best_temp_model = update_model_scores(temp_errors, consensus_temp_error)
-
-    current_wind_values = current["winds"]
-    factual_wind = round(sum(current_wind_values.values()) / len(current_wind_values), 1)
-
-    saved_winds = item["forecast"].get("winds", {})
-
-    wind_errors = {}
-
-    for source, predicted_wind in saved_winds.items():
-        if source == "consensus":
-            continue
-
-        wind_errors[source] = round(abs(predicted_wind - factual_wind), 1)
-
-    consensus_wind_error = None
-
-    if saved_winds.get("consensus") is not None:
-        consensus_wind_error = round(abs(saved_winds["consensus"] - factual_wind), 1)
-    else:
-        consensus_wind_error = round(sum(wind_errors.values()) / len(wind_errors), 1) if wind_errors else 0
-
-    current_rain_values = current["rain"]
-    factual_rain_score = round(sum(current_rain_values.values()) / len(current_rain_values), 1)
-
-    saved_rain = item["forecast"].get("rain", {})
-
-    rain_predictions = {}
-    rain_errors = {}
-
-    for source, predicted_rain in saved_rain.items():
-        rain_predictions[source] = predicted_rain
-        rain_errors[source] = round(abs(predicted_rain - factual_rain_score), 1)
-
-    if rain_predictions:
-        update_rain_scores(rain_predictions, factual_rain_score)
-
-    location_learning_result = update_location_model_scores(
-        item.get("location_key"),
-        temp_errors,
-        consensus_temp_error,
-        wind_errors,
-        consensus_wind_error,
-        rain_predictions,
-        factual_rain_score,
-    )
-
-    item["verified"] = True
-    item["verified_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    item["temperature_errors"] = temp_errors
-    item["temperature_consensus_error"] = consensus_temp_error
-    item["best_temperature_model"] = best_temp_model
-    item["factual_temperature"] = factual_temp
-    item["wind_errors"] = wind_errors
-    item["wind_consensus_error"] = consensus_wind_error
-    item["factual_wind"] = factual_wind
-    item["rain_errors"] = rain_errors
-    item["factual_rain_score"] = factual_rain_score
-
-    if location_learning_result:
-        item["location_best_temperature_model"] = location_learning_result.get("best_temp_model")
-        item["location_best_wind_model"] = location_learning_result.get("best_wind_model")
-
-    return item
-
-
-async def location_scores(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = load_location_model_scores()
-
-    if not data:
-        await update.message.reply_text(
-            "Пока нет location learning данных.\n\n"
-            "Запусти:\n"
-            "/learning_forecast_all_now\n"
-            "а позже:\n"
-            "/learning_verify_all_now"
-        )
-        return
-
-    requested_key = context.args[0] if context.args else None
-
-    if requested_key:
-        keys = [requested_key]
-    else:
-        keys = list(FAVORITE_LOCATIONS.keys())
-
-    message = "🧠 Location learning scores\n\n"
-
-    for location_key in keys:
-        if location_key not in data:
-            continue
-
-        location = FAVORITE_LOCATIONS.get(location_key, {"name": location_key})
-        weights = calculate_location_adaptive_weights(location_key)
-
-        temp_scores = data[location_key].get("temperature", {})
-        rain_scores = data[location_key].get("rain", {})
-        wind_scores = data[location_key].get("wind", {})
-
-        message += f"📍 {location.get('name')} ({location_key})\n"
-
-        if weights:
-            top_model = max(weights, key=weights.get)
-            message += f"⚖️ Top weight: {top_model} — {round(weights[top_model] * 100)}%\n"
-
-        temp_best = None
-        temp_best_error = None
-
-        for model, item in temp_scores.items():
-            if model == "consensus" or item.get("checks", 0) == 0:
-                continue
-
-            avg_error = item.get("total_error", 0) / item.get("checks", 1)
-
-            if temp_best_error is None or avg_error < temp_best_error:
-                temp_best_error = avg_error
-                temp_best = model
-
-        rain_best = None
-        rain_best_accuracy = None
-
-        for model, item in rain_scores.items():
-            if model == "consensus" or item.get("checks", 0) == 0:
-                continue
-
-            accuracy = item.get("correct", 0) / item.get("checks", 1)
-
-            if rain_best_accuracy is None or accuracy > rain_best_accuracy:
-                rain_best_accuracy = accuracy
-                rain_best = model
-
-        wind_best = None
-        wind_best_error = None
-
-        for model, item in wind_scores.items():
-            if model == "consensus" or item.get("checks", 0) == 0:
-                continue
-
-            avg_error = item.get("total_error", 0) / item.get("checks", 1)
-
-            if wind_best_error is None or avg_error < wind_best_error:
-                wind_best_error = avg_error
-                wind_best = model
-
-        message += f"🌡 Temp best: {temp_best or 'нет данных'}"
-        if temp_best_error is not None:
-            message += f" (~{round(temp_best_error, 1)}°C error)"
-        message += "\n"
-
-        message += f"☔ Rain best: {rain_best or 'нет данных'}"
-        if rain_best_accuracy is not None:
-            message += f" (~{round(rain_best_accuracy * 100)}% accuracy)"
-        message += "\n"
-
-        message += f"💨 Wind best: {wind_best or 'нет данных'}"
-        if wind_best_error is not None:
-            message += f" (~{round(wind_best_error, 1)} км/ч error)"
-        message += "\n\n"
-
-        if len(message) > 3300:
-            message += "...список сокращён."
-            break
-
-    await update.message.reply_text(message)
-
-
-async def subscribe_learning(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    settings = load_settings()
-    settings["learning_enabled"] = True
-    save_settings(settings)
-
-    await update.message.reply_text(
-        "✅ Автообучение включено.\n\n"
-        "Как работает:\n"
-        "08:00 — бот сам сохраняет прогноз по home location.\n"
-        "20:00 — бот сам проверяет факт и обновляет model_scores/rain_scores.\n\n"
-        "Проверить статус:\n"
-        "/learning_status"
-    )
-
-
-async def unsubscribe_learning(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    settings = load_settings()
-    settings["learning_enabled"] = False
-    save_settings(settings)
-
-    await update.message.reply_text(
-        "✅ Автообучение отключено."
-    )
-
-
-async def learning_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    settings = load_settings()
-    items = load_learning_forecasts()
-
-    total = len(items)
-    verified = len([item for item in items if item.get("verified")])
-    pending = total - verified
-
-    learning_enabled = settings.get("learning_enabled", False)
-
-    last_forecast_date = settings.get("last_learning_forecast_date", "")
-    last_verify_date = settings.get("last_learning_verify_date", "")
-
-    message = (
-        f"🧠 Auto-learning status\n\n"
-        f"Статус: {'✅ включено' if learning_enabled else '❌ выключено'}\n\n"
-        f"📚 Всего авто-прогнозов: {total}\n"
-        f"✅ Проверено: {verified}\n"
-        f"⏳ Ожидают проверки: {pending}\n\n"
-        f"🕗 Последний авто-прогноз: {last_forecast_date or 'нет данных'}\n"
-        f"🕗 Последняя авто-проверка: {last_verify_date or 'нет данных'}\n\n"
-        f"🏠 Home location: {get_home_location()['name']}\n"
-        f"📍 Auto-learning locations: {len(FAVORITE_LOCATIONS)}\n\n"
-        f"Файлы:\n"
-        f"📁 learning_forecasts.json\n"
-        f"📁 model_scores.json\n"
-        f"📁 rain_scores.json\n"
-        f"📁 location_model_scores.json"
-    )
-
-    await update.message.reply_text(message)
-
-
-async def run_learning_forecast_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_home_location()
-
-    try:
-        item = save_auto_learning_forecast(location)
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка ручного авто-прогноза: {e}")
-        return
-
-    await update.message.reply_text(
-        f"✅ Learning forecast сохранён вручную.\n\n"
-        f"📍 {item['location']}\n"
-        f"🕒 {item['created_at']}\n"
-        f"🌡 Consensus: ~{item['forecast']['temperatures']['consensus']}°C\n"
-        f"☔ Rain: ~{item['forecast']['rain']['consensus']}"
-    )
-
-
-async def run_learning_verify_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    items = load_learning_forecasts()
-    pending_items = [item for item in items if not item.get("verified")]
-
-    if not pending_items:
-        await update.message.reply_text("Нет авто-прогнозов, ожидающих проверки.")
-        return
-
-    item = pending_items[-1]
-
-    try:
-        verified_item = verify_auto_learning_forecast(item)
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка ручной авто-проверки: {e}")
-        return
-
-    for index, existing_item in enumerate(items):
-        if existing_item.get("id") == verified_item.get("id"):
-            items[index] = verified_item
-            break
-
-    save_learning_forecasts(items)
-
-    best_rain_model = None
-
-    if verified_item.get("rain_errors"):
-        best_rain_model = min(
-            verified_item["rain_errors"],
-            key=verified_item["rain_errors"].get
-        )
-
-    await update.message.reply_text(
-        f"✅ Learning verify выполнен вручную.\n\n"
-        f"📍 {verified_item['location']}\n"
-        f"🌡 Факт: ~{verified_item['factual_temperature']}°C\n"
-        f"🏆 Лучшая temp-модель: {verified_item['best_temperature_model']}\n"
-        f"☔ Rain fact score: ~{verified_item['factual_rain_score']}\n"
-        f"🏆 Лучшая rain-модель: {best_rain_model or 'нет данных'}\n\n"
-        f"Scores обновлены."
-    )
-
-
-async def check_learning_schedule(context: ContextTypes.DEFAULT_TYPE):
-    settings = load_settings()
-
-    if not settings.get("learning_enabled", False):
-        return
-
-    now = datetime.now(ZoneInfo(settings.get("timezone", "Europe/Moscow")))
-    current_time = now.strftime("%H:%M")
-    current_date = now.strftime("%Y-%m-%d")
-
-    # Утром сохраняем прогнозы по всем избранным локациям.
-    if current_time == "08:00" and settings.get("last_learning_forecast_date") != current_date:
-        try:
-            save_auto_learning_forecasts_for_all_locations()
-            settings["last_learning_forecast_date"] = current_date
-            save_settings(settings)
-
-        except Exception:
-            return
-
-    # Вечером проверяем все непроверенные прогнозы за сегодня.
-    if current_time == "20:00" and settings.get("last_learning_verify_date") != current_date:
-        items = load_learning_forecasts()
-        pending_items = [
-            item for item in items
-            if not item.get("verified") and item.get("date") == current_date
-        ]
-
-        if not pending_items:
-            return
-
-        changed = False
-
-        for item in pending_items:
-            try:
-                verified_item = verify_auto_learning_forecast(item)
-
-                for index, existing_item in enumerate(items):
-                    if existing_item.get("id") == verified_item.get("id"):
-                        items[index] = verified_item
-                        changed = True
-                        break
-
-            except Exception:
-                continue
-
-        if changed:
-            save_learning_forecasts(items)
-
-        settings["last_learning_verify_date"] = current_date
-        save_settings(settings)
-
-
-async def learning_forecast_all_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        items = save_auto_learning_forecasts_for_all_locations()
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка learning forecast all: {e}")
-        return
-
-    await update.message.reply_text(
-        f"✅ Learning forecast сохранён по всем избранным локациям.\n\n"
-        f"Сохранено: {len(items)}\n"
-        f"Локации: {', '.join([item['location_key'] for item in items])}"
-    )
-
-
-async def learning_verify_all_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    items = load_learning_forecasts()
-    pending_items = [item for item in items if not item.get("verified")]
-
-    if not pending_items:
-        await update.message.reply_text("Нет авто-прогнозов, ожидающих проверки.")
-        return
-
-    verified_count = 0
-
-    for item in pending_items:
-        try:
-            verified_item = verify_auto_learning_forecast(item)
-
-            for index, existing_item in enumerate(items):
-                if existing_item.get("id") == verified_item.get("id"):
-                    items[index] = verified_item
-                    verified_count += 1
-                    break
-
-        except Exception:
-            continue
-
-    save_learning_forecasts(items)
-
-    await update.message.reply_text(
-        f"✅ Learning verify выполнен по всем доступным непроверенным прогнозам.\n\n"
-        f"Проверено: {verified_count}\n"
-        f"Scores обновлены."
-    )
-
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🌦 AI Weather Assistant\n\n"
         "Команды:\n"
         "/weather\n"
-        "/alerts\n"
-        "/danger_alerts\n"
-        "/subscribe_danger_alerts\n"
-        "/unsubscribe_danger_alerts\n"
-        "/danger_status\n"
-        "/trip\n"
-        "/baidarka\n"
-        "/camping\n"
-        "/morning\n"
-        "/subscribe_morning\n"
-        "/unsubscribe_morning\n"
         "/today_parts\n"
         "/tomorrow_parts\n"
         "/tomorrow\n"
         "/weekend\n"
-        "/weekend_parts\n"
-        "/week\n"
-        "/week_parts\n"
         "/history\n"
         "/analyze\n"
         "/verify\n"
@@ -1336,7 +748,32 @@ async def weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Ошибка получения погоды: {e}")
         return
 
-    ai_prompt = build_practical_weather_reasoning_prompt(location, c)
+    ai_prompt = f"""
+Локация:
+{location['name']}
+
+Температуры:
+{c['temp_values']}
+
+Ветер:
+{c['wind_values']}
+
+Осадки / rain score:
+{c['rain_values']}
+
+Consensus:
+Температура: {c['avg_temp']}
+Ветер: {c['avg_wind']}
+Осадки: {c['avg_rain']}
+
+Уверенность по температуре:
+{c['temp_confidence']}
+
+Уверенность по осадкам:
+{c['rain_confidence']}
+
+Сделай краткий полезный вывод. Обязательно скажи, брать ли зонт.
+"""
 
     ai_summary = get_ai_summary(ai_prompt)
 
@@ -1356,993 +793,34 @@ async def weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     save_forecast_history(location["name"], forecast_history)
 
-    message = build_weather_message(location, c, ai_summary)
-
-    await update.message.reply_text(message)
-
-
-def build_morning_message_for_location(location):
-    current = get_current_sources(location)
-    current_consensus = build_consensus(location, current)
-    parts = get_hourly_parts_sources(location)
-
-    morning_part = parts.get("morning", {})
-    day_part = parts.get("day", {})
-    evening_part = parts.get("evening", {})
-    night_part = parts.get("night", {})
-
-    ai_prompt = build_morning_prompt(
-        location,
-        current_consensus,
-        morning_part,
-        day_part,
-        evening_part,
-        night_part,
-    )
-
-    ai_summary = get_ai_summary(ai_prompt)
-
-    return build_morning_message(
-        location,
-        current_consensus,
-        morning_part,
-        day_part,
-        evening_part,
-        night_part,
-        ai_summary,
-    )
-    ai_summary = get_ai_summary(ai_prompt)
-
-    return (
-        f"🌅 Утренний прогноз\n"
-        f"📍 {location['name']}, {location['country']}\n\n"
-
-        f"📌 Сейчас:\n"
-        f"🌡 ~{current_consensus['avg_temp']}°C\n"
-        f"💨 ~{current_consensus['avg_wind']} км/ч\n"
-        f"☔ Rain: ~{current_consensus['avg_rain']}\n"
-        f"✅ Temp: {current_consensus['temp_confidence']}, Rain: {current_consensus['rain_confidence']}\n"
-        f"⚙️ Режим: {current_consensus['weights_mode']}\n\n"
-
-        f"🕒 Сегодня:\n"
-        f"🌅 Утро: ~{morning_part.get('temp')}°C, дождь ~{morning_part.get('rain')}%, ветер до ~{morning_part.get('wind')} км/ч\n"
-        f"☀️ День: ~{day_part.get('temp')}°C, дождь ~{day_part.get('rain')}%, ветер до ~{day_part.get('wind')} км/ч\n"
-        f"🌆 Вечер: ~{evening_part.get('temp')}°C, дождь ~{evening_part.get('rain')}%, ветер до ~{evening_part.get('wind')} км/ч\n"
-        f"🌙 Ночь: ~{night_part.get('temp')}°C, дождь ~{night_part.get('rain')}%, ветер до ~{night_part.get('wind')} км/ч\n\n"
-
-        f"🤖 AI-вывод:\n"
-        f"{ai_summary}"
-    )
-
-
-def format_contextual_rain(rain):
-    if rain >= 70:
-        return "🔴 высокий риск дождя"
-    if rain >= 50:
-        return "🟠 заметный риск дождя"
-    if rain >= 30:
-        return "🟡 возможен дождь"
-    return "🟢 дождь маловероятен"
-
-
-def format_contextual_wind(wind):
-    if wind >= 35:
-        return "🔴 очень сильный ветер"
-    if wind >= 25:
-        return "🟠 сильный ветер"
-    if wind >= 16:
-        return "🟡 ощутимый ветер"
-    return "🟢 ветер комфортный"
-
-
-def build_contextual_trip_summary(
-    location,
-    tomorrow_c,
-    tomorrow_score,
-    saturday_c,
-    saturday_score,
-    sunday_c,
-    sunday_score,
-    best_week_day,
-    worst_week_day,
-):
-    lines = []
-
-    if tomorrow_score >= 70:
-        lines.append("🟢 Завтра условия в целом подходят для поездки.")
-    elif tomorrow_score >= 45:
-        lines.append("🟡 Завтра ехать можно, но лучше иметь запасной план.")
-    else:
-        lines.append("🔴 Завтра активную поездку лучше не планировать.")
-
-    if tomorrow_c["avg_rain"] >= 50:
-        lines.append("☔ Зонт/дождевик лучше взять: риск дождя заметный.")
-    elif tomorrow_c["avg_rain"] >= 30:
-        lines.append("🌦 Дождь не главный риск, но лёгкий дождевик не помешает.")
-    else:
-        lines.append("✅ По дождю ситуация спокойная.")
-
-    if tomorrow_c["avg_wind"] >= 25:
-        lines.append("💨 Ветер может мешать прогулкам и активностям на открытом месте.")
-    elif tomorrow_c["avg_wind"] >= 16:
-        lines.append("🌬 Ветер ощутимый: лучше взять верхний слой одежды.")
-
-    weekend_best = "суббота" if saturday_score >= sunday_score else "воскресенье"
-    weekend_score = max(saturday_score, sunday_score)
-
-    if weekend_score >= 55:
-        lines.append(f"🏕 Из выходных лучше выглядит {weekend_best}.")
-    else:
-        lines.append("🏕 Выходные выглядят спорно: лучше планировать короткий формат или запасной вариант.")
-
-    lines.append(
-        f"🏆 Лучший день недели: {best_week_day['date']} — {best_week_day['score']}/100."
-    )
-    lines.append(
-        f"⚠️ Худший день недели: {worst_week_day['date']} — дождь ~{worst_week_day['rain']}%, ветер ~{worst_week_day['wind']} км/ч."
-    )
-
-    if tomorrow_c.get("rain_confidence") == "низкая":
-        lines.append("📊 По осадкам модели спорят — прогноз по дождю ненадёжный.")
-
-    return "\n".join(lines)
-
-
-def build_contextual_baidarka_summary(
-    location,
-    best_window,
-    worst_window,
-    saturday_c,
-    saturday_score,
-    sunday_c,
-    sunday_score,
-):
-    lines = []
-
-    if best_window["score"] >= 70:
-        lines.append("🟢 Для байдарки есть хорошее погодное окно.")
-    elif best_window["score"] >= 50:
-        lines.append("🟡 Для байдарки условия средние: идти можно аккуратно.")
-    else:
-        lines.append("🔴 Хорошего окна для байдарки почти нет.")
-
-    lines.append(
-        f"🏆 Лучшее окно: {best_window['day_label']} {best_window['part_title']} — "
-        f"ветер до ~{best_window['wind']} км/ч, дождь ~{best_window['rain']}%."
-    )
-
-    if best_window["wind"] >= 20:
-        lines.append("🌊 На открытой воде может быть некомфортно из-за ветра.")
-    if best_window["rain"] >= 50:
-        lines.append("☔ Нужен дождевик/гермомешок: риск дождя заметный.")
-
-    lines.append(
-        f"⚠️ Худшее окно: {worst_window['day_label']} {worst_window['part_title']} — "
-        f"лучше не выходить на воду."
-    )
-
-    if saturday_score >= sunday_score:
-        lines.append(f"🏕 Из выходных лучше суббота: {saturday_score}/100.")
-    else:
-        lines.append(f"🏕 Из выходных лучше воскресенье: {sunday_score}/100.")
-
-    lines.append("🦺 Минимум: спасжилет, гермомешок, дождевик и запасной сухой слой.")
-
-    return "\n".join(lines)
-
-
-def build_contextual_camping_summary(location, best_day, worst_day, week_data):
-    lines = []
-
-    if best_day["score"] >= 70:
-        lines.append("🟢 Для палатки есть хороший день.")
-    elif best_day["score"] >= 50:
-        lines.append("🟡 Палатку можно планировать, но с погодными оговорками.")
-    else:
-        lines.append("🔴 На неделе нет явно комфортного дня для палатки.")
-
-    lines.append(
-        f"🏆 Лучший день: {best_day['date']} — день ~{best_day['day_temp']}°C, "
-        f"ночь ~{best_day['night_temp']}°C, дождь ~{best_day['rain']}%."
-    )
-
-    if best_day["night_temp"] <= 7:
-        lines.append("🌙 Ночь холодная: нужен тёплый спальник и утепление.")
-    elif best_day["night_temp"] <= 12:
-        lines.append("🌙 Ночью прохладно: лучше взять тёплый слой.")
-
-    if best_day["rain"] >= 50:
-        lines.append("☔ Для палатки обязателен тент/защита от дождя.")
-    if best_day["wind"] >= 25:
-        lines.append("💨 Ветер заметный: хорошо закрепи палатку и не ставь её под деревьями.")
-
-    lines.append(
-        f"⚠️ Худший день: {worst_day['date']} — дождь ~{worst_day['rain']}%, "
-        f"ветер ~{worst_day['wind']} км/ч."
-    )
-
-    lines.append("🎒 Базово взять: тент, сухой комплект, пауэрбанк, фонарь, тёплый слой.")
-
-    return "\n".join(lines)
-
-
-
-async def trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context)
-
-    if not location:
-        await update.message.reply_text(
-            "Локация не найдена 😢\n\n"
-            "Пример:\n"
-            "/trip kalyazin\n"
-            "/trip khvoynaya"
-        )
-        return
-
-    today = datetime.now()
-    tomorrow_date = today + timedelta(days=1)
-
-    days_until_saturday = (5 - today.weekday()) % 7
-
-    if days_until_saturday == 0 and today.hour >= 18:
-        days_until_saturday = 7
-
-    saturday = today + timedelta(days=days_until_saturday)
-    sunday = saturday + timedelta(days=1)
-
-    try:
-        tomorrow_sources = get_daily_sources(location, tomorrow_date)
-        tomorrow_c = build_consensus(location, tomorrow_sources)
-
-        saturday_sources = get_daily_sources(location, saturday)
-        saturday_c = build_consensus(location, saturday_sources)
-
-        sunday_sources = get_daily_sources(location, sunday)
-        sunday_c = build_consensus(location, sunday_sources)
-
-        week_items = []
-
-        for i in range(7):
-            target_day = today + timedelta(days=i)
-            sources = get_daily_sources(location, target_day)
-            c = build_consensus(location, sources)
-
-            score = calculate_trip_score(
-                c["avg_temp"],
-                c["avg_rain"],
-                c["avg_wind"],
-                c["rain_spread"],
-            )
-
-            week_items.append({
-                "date": target_day.strftime("%Y-%m-%d"),
-                "weekday": target_day.strftime("%a"),
-                "temp": c["avg_temp"],
-                "rain": c["avg_rain"],
-                "wind": c["avg_wind"],
-                "rain_confidence": c["rain_confidence"],
-                "rain_spread": c["rain_spread"],
-                "score": score,
-                "recommendation": trip_recommendation_from_score(score),
-            })
-
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка анализа поездки: {e}")
-        return
-
-    tomorrow_score = calculate_trip_score(
-        tomorrow_c["avg_temp"],
-        tomorrow_c["avg_rain"],
-        tomorrow_c["avg_wind"],
-        tomorrow_c["rain_spread"],
-    )
-
-    saturday_score = calculate_trip_score(
-        saturday_c["avg_temp"],
-        saturday_c["avg_rain"],
-        saturday_c["avg_wind"],
-        saturday_c["rain_spread"],
-    )
-
-    sunday_score = calculate_trip_score(
-        sunday_c["avg_temp"],
-        sunday_c["avg_rain"],
-        sunday_c["avg_wind"],
-        sunday_c["rain_spread"],
-    )
-
-    best_week_day = max(week_items, key=lambda x: x["score"])
-    worst_week_day = min(week_items, key=lambda x: x["score"])
-
-    ai_summary = build_contextual_trip_summary(
-        location,
-        tomorrow_c,
-        tomorrow_score,
-        saturday_c,
-        saturday_score,
-        sunday_c,
-        sunday_score,
-        best_week_day,
-        worst_week_day,
-    )
-
-    message = build_trip_message(
-    location,
-    tomorrow_date,
-    tomorrow_c,
-    tomorrow_score,
-    saturday,
-    saturday_c,
-    saturday_score,
-    sunday,
-    sunday_c,
-    sunday_score,
-    best_week_day,
-    worst_week_day,
-    ai_summary,
-    trip_recommendation_from_score,
-)
-
-    await update.message.reply_text(message)
-
-
-
-async def baidarka(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context)
-
-    if not location:
-        await update.message.reply_text(
-            "Локация не найдена 😢\n\n"
-            "Пример:\n"
-            "/baidarka kalyazin\n"
-            "/baidarka khvoynaya"
-        )
-        return
-
-    today = datetime.now()
-    tomorrow = today + timedelta(days=1)
-
-    days_until_saturday = (5 - today.weekday()) % 7
-
-    if days_until_saturday == 0 and today.hour >= 18:
-        days_until_saturday = 7
-
-    saturday = today + timedelta(days=days_until_saturday)
-    sunday = saturday + timedelta(days=1)
-
-    try:
-        today_parts_data = get_hourly_parts_sources(location, today.strftime("%Y-%m-%d"))
-        tomorrow_parts_data = get_hourly_parts_sources(location, tomorrow.strftime("%Y-%m-%d"))
-
-        saturday_sources = get_daily_sources(location, saturday)
-        saturday_c = build_consensus(location, saturday_sources)
-
-        sunday_sources = get_daily_sources(location, sunday)
-        sunday_c = build_consensus(location, sunday_sources)
-
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка анализа условий для байдарки: {e}")
-        return
-
-    # Анализируем лучшие окна сегодня и завтра по частям дня.
-    part_candidates = []
-
-    for day_label, date_obj, parts in [
-        ("Сегодня", today, today_parts_data),
-        ("Завтра", tomorrow, tomorrow_parts_data),
-    ]:
-        for key in ["morning", "day", "evening"]:
-            part = parts[key]
-
-            score = calculate_baidarka_score(
-                part.get("temp", 0),
-                part.get("rain", 0),
-                part.get("wind", 0),
-                0,
-            )
-
-            part_candidates.append({
-                "day_label": day_label,
-                "date": date_obj.strftime("%Y-%m-%d"),
-                "part_title": part.get("title"),
-                "temp": part.get("temp", 0),
-                "rain": part.get("rain", 0),
-                "wind": part.get("wind", 0),
-                "score": score,
-                "recommendation": baidarka_recommendation(
-                    score,
-                    part.get("wind", 0),
-                    part.get("rain", 0),
-                ),
-            })
-
-    best_window = max(part_candidates, key=lambda x: x["score"])
-    worst_window = min(part_candidates, key=lambda x: x["score"])
-
-    saturday_score = calculate_baidarka_score(
-        saturday_c["avg_temp"],
-        saturday_c["avg_rain"],
-        saturday_c["avg_wind"],
-        saturday_c["rain_spread"],
-    )
-
-    sunday_score = calculate_baidarka_score(
-        sunday_c["avg_temp"],
-        sunday_c["avg_rain"],
-        sunday_c["avg_wind"],
-        sunday_c["rain_spread"],
-    )
-
-    ai_summary = build_contextual_baidarka_summary(
-        location,
-        best_window,
-        worst_window,
-        saturday_c,
-        saturday_score,
-        sunday_c,
-        sunday_score,
-    )
-
-    message = build_baidarka_message(
-    location,
-    best_window,
-    worst_window,
-    saturday,
-    saturday_c,
-    saturday_score,
-    sunday,
-    sunday_c,
-    sunday_score,
-    ai_summary,
-    baidarka_recommendation,
-)
-
-    await update.message.reply_text(message)
-
-
-
-async def camping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context)
-
-    if not location:
-        await update.message.reply_text(
-            "Локация не найдена 😢\n\n"
-            "Пример:\n"
-            "/camping kalyazin\n"
-            "/camping khvoynaya"
-        )
-        return
-
-    today = datetime.now()
-
-    try:
-        week_data = []
-
-        for i in range(7):
-            target_day = today + timedelta(days=i)
-            target_date = target_day.strftime("%Y-%m-%d")
-
-            parts = get_hourly_parts_sources(location, target_date)
-
-            morning = parts["morning"]
-            day = parts["day"]
-            evening = parts["evening"]
-            night = parts["night"]
-
-            overall_score = (
-                calculate_camping_score(
-                    day.get("temp", 0),
-                    day.get("rain", 0),
-                    day.get("wind", 0),
-                    0,
-                    False,
-                ) * 0.4
-                +
-                calculate_camping_score(
-                    evening.get("temp", 0),
-                    evening.get("rain", 0),
-                    evening.get("wind", 0),
-                    0,
-                    False,
-                ) * 0.3
-                +
-                calculate_camping_score(
-                    night.get("temp", 0),
-                    night.get("rain", 0),
-                    night.get("wind", 0),
-                    0,
-                    True,
-                ) * 0.3
-            )
-
-            overall_score = round(overall_score, 1)
-
-            week_data.append({
-                "date": target_date,
-                "weekday": target_day.strftime("%a"),
-                "day_temp": day.get("temp", 0),
-                "night_temp": night.get("temp", 0),
-                "rain": max(
-                    morning.get("rain", 0),
-                    day.get("rain", 0),
-                    evening.get("rain", 0),
-                    night.get("rain", 0),
-                ),
-                "wind": max(
-                    morning.get("wind", 0),
-                    day.get("wind", 0),
-                    evening.get("wind", 0),
-                    night.get("wind", 0),
-                ),
-                "score": overall_score,
-                "recommendation": camping_recommendation(
-                    overall_score,
-                    max(
-                        morning.get("rain", 0),
-                        day.get("rain", 0),
-                        evening.get("rain", 0),
-                        night.get("rain", 0),
-                    ),
-                    max(
-                        morning.get("wind", 0),
-                        day.get("wind", 0),
-                        evening.get("wind", 0),
-                        night.get("wind", 0),
-                    ),
-                    night.get("temp", 0),
-                ),
-                "parts": parts,
-            })
-
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка camping mode: {e}")
-        return
-
-    best_day = max(week_data, key=lambda x: x["score"])
-    worst_day = min(week_data, key=lambda x: x["score"])
-
-    ai_summary = build_contextual_camping_summary(
-        location,
-        best_day,
-        worst_day,
-        week_data,
-    )
-
-    message = build_camping_message(
-    location,
-    best_day,
-    worst_day,
-    week_data,
-    ai_summary,
-)
-    for item in week_data:
-        message += (
-            f"📅 {item['date']} ({item['weekday']}) — "
-            f"{item['score']}/100\n"
-            f"🌡 День ~{item['day_temp']}°C / Ночь ~{item['night_temp']}°C\n"
-            f"☔ ~{item['rain']}% | 💨 ~{item['wind']} км/ч\n"
-            f"{item['recommendation']}\n\n"
-        )
-
-    message += (
-        f"🤖 AI-вывод:\n"
-        f"{ai_summary}"
-    )
-
-    await update.message.reply_text(message)
-
-
-    data = requests.get(url, timeout=20).json()
-    hourly = data.get("hourly", {})
-
-    times = hourly.get("time", [])
-    temperatures = hourly.get("temperature_2m", [])
-    precip_probs = hourly.get("precipitation_probability", [])
-    precipitations = hourly.get("precipitation", [])
-    rains = hourly.get("rain", [])
-    showers = hourly.get("showers", [])
-    snowfalls = hourly.get("snowfall", [])
-    weather_codes = hourly.get("weather_code", [])
-    winds = hourly.get("wind_speed_10m", [])
-    gusts = hourly.get("wind_gusts_10m", [])
-    visibility = hourly.get("visibility", [])
-
-    events = []
-
-    for index, time_str in enumerate(times[:hours_limit]):
-        temp = temperatures[index] if index < len(temperatures) else 0
-        precip_prob = precip_probs[index] if index < len(precip_probs) else 0
-        precipitation = precipitations[index] if index < len(precipitations) else 0
-        rain = rains[index] if index < len(rains) else 0
-        shower = showers[index] if index < len(showers) else 0
-        snowfall = snowfalls[index] if index < len(snowfalls) else 0
-        code = weather_codes[index] if index < len(weather_codes) else 0
-        wind = winds[index] if index < len(winds) else 0
-        gust = gusts[index] if index < len(gusts) else 0
-        vis = visibility[index] if index < len(visibility) else None
-
-        local_time = datetime.fromisoformat(time_str)
-        formatted_time = local_time.strftime("%d.%m %H:%M")
-        description = weather_code_description(code)
-
-        # Дождь
-        if precip_prob >= 70 or precipitation >= 3 or rain >= 2 or shower >= 2 or code in [61, 63, 65, 80, 81, 82]:
-            severity = "🔴" if precip_prob >= 85 or precipitation >= 5 or code in [65, 82] else "🟠"
-            events.append({
-                "time": formatted_time,
-                "type": "rain",
-                "severity": severity,
-                "text": f"{severity} 🌧 Дождь: {formatted_time}, вероятность ~{precip_prob}%, осадки ~{precipitation} мм, {description}",
-            })
-
-        # Гроза
-        if code in [95, 96, 99]:
-            severity = "🔴" if code in [96, 99] else "🟠"
-            events.append({
-                "time": formatted_time,
-                "type": "storm",
-                "severity": severity,
-                "text": f"{severity} ⛈ Гроза: {formatted_time}, {description}",
-            })
-
-        # Град
-        if code in [96, 99]:
-            events.append({
-                "time": formatted_time,
-                "type": "hail",
-                "severity": "🔴",
-                "text": f"🔴 🧊 Риск града: {formatted_time}, {description}",
-            })
-
-        # Снег
-        if snowfall > 0 or code in [71, 73, 75, 77, 85, 86]:
-            severity = "🔴" if snowfall >= 2 or code in [75, 86] else "🟠"
-            events.append({
-                "time": formatted_time,
-                "type": "snow",
-                "severity": severity,
-                "text": f"{severity} ❄️ Снег: {formatted_time}, снег ~{snowfall} мм, {description}",
-            })
-
-        # Сильный ветер
-        if wind >= 30 or gust >= 45:
-            severity = "🔴" if wind >= 40 or gust >= 60 else "🟠"
-            events.append({
-                "time": formatted_time,
-                "type": "wind",
-                "severity": severity,
-                "text": f"{severity} 💨 Сильный ветер: {formatted_time}, ветер ~{wind} км/ч, порывы ~{gust} км/ч",
-            })
-
-        # Туман
-        if code in [45, 48] or (vis is not None and vis <= 1000):
-            events.append({
-                "time": formatted_time,
-                "type": "fog",
-                "severity": "🟡",
-                "text": f"🟡 🌫 Туман/плохая видимость: {formatted_time}, видимость ~{vis} м, {description}",
-            })
-
-        # Жара
-        if temp >= 30:
-            severity = "🔴" if temp >= 35 else "🟠"
-            events.append({
-                "time": formatted_time,
-                "type": "heat",
-                "severity": severity,
-                "text": f"{severity} 🔥 Жара: {formatted_time}, температура ~{temp}°C",
-            })
-
-        # Резкое похолодание / холод
-        if temp <= -10:
-            severity = "🔴" if temp <= -20 else "🟠"
-            events.append({
-                "time": formatted_time,
-                "type": "cold",
-                "severity": severity,
-                "text": f"{severity} 🥶 Сильный холод: {formatted_time}, температура ~{temp}°C",
-            })
-
-    # Уберём дубли по одному типу и времени.
-    unique = []
-    seen = set()
-
-    for event in events:
-        key = (event["time"], event["type"])
-        if key not in seen:
-            unique.append(event)
-            seen.add(key)
-
-    return unique
-
-def add_danger_subscriber(chat_id, location_key="home"):
-    subscribers = load_danger_subscribers()
-    chat_id = str(chat_id)
-
-    updated = False
-
-    for subscriber in subscribers:
-        if str(subscriber.get("chat_id")) == chat_id:
-            subscriber["location_key"] = location_key
-            updated = True
-            break
-
-    if not updated:
-        subscribers.append({
-            "chat_id": chat_id,
-            "location_key": location_key,
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "last_alert_signature": "",
-            "last_alert_date": "",
-        })
-
-    save_danger_subscribers(subscribers)
-
-
-def remove_danger_subscriber(chat_id):
-    subscribers = load_danger_subscribers()
-    chat_id = str(chat_id)
-
-    subscribers = [
-        subscriber for subscriber in subscribers
-        if str(subscriber.get("chat_id")) != chat_id
-    ]
-
-    save_danger_subscribers(subscribers)
-
-
-
-def build_danger_message(location, events, auto=False):
-    if not events:
-        return (
-            f"🟢 Опасных погодных событий не найдено\n\n"
-            f"📍 {location['name']}, {location['country']}\n"
-            f"Период: ближайшие 48 часов"
-        )
-
-    prefix = "🚨 Auto Danger Alert" if auto else "⚠️ Danger Weather Alerts"
-
     message = (
-        f"{prefix}\n"
-        f"📍 {location['name']}, {location['country']}\n"
-        f"Период: ближайшие 48 часов\n\n"
+        f"📍 {location['name']}, {location['country']}\n\n"
+        f"🌡 Температура:\n"
+        f"🌦 Open-Meteo: {c['temp_values']['openmeteo']}°C\n"
+        f"🌤 WeatherAPI: {c['temp_values']['weatherapi']}°C\n"
+        f"🌍 Visual Crossing: {c['temp_values']['visualcrossing']}°C\n"
+        f"🇳🇴 yr.no: {c['temp_values']['yr']}°C\n"
+        f"🌐 Meteosource: {c['temp_values']['meteosource']}°C\n\n"
+        f"☔ Осадки / rain score:\n"
+        f"🌦 Open-Meteo: {c['rain_values']['openmeteo']}\n"
+        f"🌤 WeatherAPI: {c['rain_values']['weatherapi']}\n"
+        f"🌍 Visual Crossing: {c['rain_values']['visualcrossing']}\n"
+        f"🇳🇴 yr.no: {c['rain_values']['yr']}\n"
+        f"🌐 Meteosource: {c['rain_values']['meteosource']}\n\n"
+        f"🧠 Weighted Consensus:\n"
+        f"🌡 ~{c['avg_temp']}°C\n"
+        f"💨 ~{c['avg_wind']} км/ч\n"
+        f"☔ Rain Consensus: ~{c['avg_rain']}\n"
+        f"📊 Temp Spread: {c['temp_spread']}°C\n"
+        f"📊 Rain Spread: {c['rain_spread']}\n"
+        f"✅ Temp confidence: {c['temp_confidence']}\n"
+        f"✅ Rain confidence: {c['rain_confidence']}\n"
+        f"⚙️ Весовой режим: {c['weights_mode']}\n\n"
+        f"🤖 AI-вывод:\n"
+        f"{ai_summary}"
     )
-
-    for event in events[:10]:
-        message += f"{event['text']}\n"
-
-    if len(events) > 10:
-        message += f"\n...и ещё {len(events) - 10} событий.\n"
-
-    # Для авто-алертов делаем коротко, без GPT, чтобы не тратить токены каждый час.
-    if auto:
-        message += (
-            "\nСовет: проверь планы на улицу, дорогу, воду или кемпинг. "
-            "Если риск связан с дождём/грозой — лучше иметь дождевик и запасной план."
-        )
-
-    return message
-
-
-async def subscribe_danger_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    location_key = "home"
-
-    if context.args:
-        requested_key = context.args[0].lower()
-
-        if requested_key not in FAVORITE_LOCATIONS:
-            await update.message.reply_text(
-                "Такой избранной локации нет 😢\n\n"
-                "Пример:\n"
-                "/subscribe_danger_alerts home\n"
-                "/subscribe_danger_alerts kalyazin\n"
-                "/subscribe_danger_alerts khvoynaya"
-            )
-            return
-
-        location_key = requested_key
-
-    add_danger_subscriber(chat_id, location_key)
-
-    if location_key == "home":
-        location = get_user_home_location(chat_id)
-    else:
-        location = get_location_by_key(location_key)
-
-    await update.message.reply_text(
-        f"✅ Авто-алерты опасной погоды включены только для тебя.\n\n"
-        f"📍 Локация: {location['name']}\n"
-        f"Проверка: каждый час\n"
-        f"Период анализа: ближайшие 48 часов\n\n"
-        f"Бот будет писать только если найдёт риск: дождь, сильный ветер, грозу, снег, град, туман, жару или сильный холод."
-    )
-
-
-async def unsubscribe_danger_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    remove_danger_subscriber(update.effective_chat.id)
-
-    await update.message.reply_text(
-        "✅ Авто-алерты опасной погоды отключены."
-    )
-
-
-async def danger_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    subscribers = load_danger_subscribers()
-    chat_id = str(update.effective_chat.id)
-
-    subscription = None
-
-    for subscriber in subscribers:
-        if str(subscriber.get("chat_id")) == chat_id:
-            subscription = subscriber
-            break
-
-    if not subscription:
-        await update.message.reply_text(
-            "🚨 Danger alerts: ❌ отключены\n\n"
-            "Включить:\n"
-            "/subscribe_danger_alerts\n"
-            "/subscribe_danger_alerts kalyazin"
-        )
-        return
-
-    location_key = subscription.get("location_key", "home")
-
-    if location_key == "home":
-        location = get_user_home_location(chat_id)
-    else:
-        location = get_location_by_key(location_key)
-
-    await update.message.reply_text(
-        f"🚨 Danger alerts: ✅ включены\n\n"
-        f"📍 Локация: {location['name']}\n"
-        f"Проверка: каждый час\n"
-        f"Период анализа: ближайшие 48 часов\n"
-        f"Последний alert date: {subscription.get('last_alert_date') or 'нет данных'}"
-    )
-
-
-async def check_danger_alerts_schedule(context: ContextTypes.DEFAULT_TYPE):
-    subscribers = load_danger_subscribers()
-
-    if not subscribers:
-        return
-
-    updated_subscribers = []
-
-    for subscriber in subscribers:
-        chat_id = str(subscriber.get("chat_id"))
-        location_key = subscriber.get("location_key", "home")
-
-        if location_key == "home":
-            location = get_user_home_location(chat_id)
-        else:
-            location = get_location_by_key(location_key)
-
-        if not location:
-            updated_subscribers.append(subscriber)
-            continue
-
-        try:
-            events = detect_danger_events(location, hours_limit=48)
-
-            if not events:
-                updated_subscribers.append(subscriber)
-                continue
-
-            signature = build_danger_signature(events)
-            today = datetime.now().strftime("%Y-%m-%d")
-
-            # Не шлём одно и то же повторно.
-            if (
-                subscriber.get("last_alert_signature") == signature
-                and subscriber.get("last_alert_date") == today
-            ):
-                updated_subscribers.append(subscriber)
-                continue
-
-            message = build_danger_message(location, events, auto=True)
-
-            await context.bot.send_message(
-                chat_id=int(chat_id),
-                text=message
-            )
-
-            subscriber["last_alert_signature"] = signature
-            subscriber["last_alert_date"] = today
-
-        except Exception:
-            pass
-
-        updated_subscribers.append(subscriber)
-
-    save_danger_subscribers(updated_subscribers)
-
-
-async def morning(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # По умолчанию утренний брифинг делаем по дому.
-    # Но можно вызвать /morning kalyazin или /morning khvoynaya.
-    location = get_location(context, default_key="home")
-
-    if not location:
-        await update.message.reply_text("Локация не найдена 😢")
-        return
-
-    try:
-        message = build_morning_message_for_location(location)
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка утреннего прогноза: {e}")
-        return
 
     await update.message.reply_text(message)
-
-
-async def subscribe_morning(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    location_key = "home"
-
-    if context.args:
-        requested_key = context.args[0].lower()
-
-        if requested_key not in FAVORITE_LOCATIONS:
-            await update.message.reply_text(
-                "Такой избранной локации нет 😢\n\n"
-                "Пример:\n"
-                "/subscribe_morning home\n"
-                "/subscribe_morning kalyazin\n"
-                "/subscribe_morning khvoynaya"
-            )
-            return
-
-        location_key = requested_key
-
-    add_morning_subscriber(chat_id, location_key)
-
-    if location_key == "home":
-        location = get_user_home_location(chat_id)
-    else:
-        location = get_location_by_key(location_key)
-
-    morning_time = get_user_morning_time(chat_id)
-
-    await update.message.reply_text(
-        f"✅ Утренний прогноз включён только для тебя.\n"
-        f"Локация: {location['name']}\n"
-        f"Время: каждый день в {morning_time} по Москве.\n\n"
-        f"Проверить вручную можно командой:\n"
-        f"/morning {location_key}"
-    )
-
-
-async def unsubscribe_morning(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    remove_morning_subscriber(update.effective_chat.id)
-
-    await update.message.reply_text(
-        "✅ Утренний прогноз отключён."
-    )
-
-
-async def send_scheduled_morning(context: ContextTypes.DEFAULT_TYPE):
-    subscribers = load_morning_subscribers()
-
-    for subscriber in subscribers:
-        chat_id = subscriber.get("chat_id")
-        location_key = subscriber.get("location_key", "home")
-        location = get_location_by_key(location_key)
-
-        try:
-            message = build_morning_message_for_location(location)
-            await context.bot.send_message(
-                chat_id=int(chat_id),
-                text=message
-            )
-
-        except Exception as e:
-            await context.bot.send_message(
-                chat_id=int(chat_id),
-                text=f"Ошибка утреннего прогноза: {e}"
-            )
 
 
 async def today_parts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2607,242 +1085,6 @@ Rain spread {sun['rain_spread']}
         f"☔ ~{sun['avg_rain']}%\n"
         f"✅ Temp: {sun['temp_confidence']}, Rain: {sun['rain_confidence']}\n"
         f"📊 Rain spread: {sun['rain_spread']}%\n\n"
-        f"🤖 AI-вывод:\n"
-        f"{ai_summary}"
-    )
-
-    await update.message.reply_text(message)
-
-
-async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context)
-
-    if not location:
-        await update.message.reply_text("Локация не найдена 😢")
-        return
-
-    today = datetime.now()
-
-    daily_results = []
-
-    try:
-        for i in range(7):
-            target_day = today + timedelta(days=i)
-            sources = get_daily_sources(location, target_day)
-            c = build_consensus(location, sources)
-
-            daily_results.append({
-                "date": target_day.strftime("%Y-%m-%d"),
-                "weekday": target_day.strftime("%a"),
-                "avg_temp": c["avg_temp"],
-                "avg_wind": c["avg_wind"],
-                "avg_rain": c["avg_rain"],
-                "temp_confidence": c["temp_confidence"],
-                "rain_confidence": c["rain_confidence"],
-                "rain_spread": c["rain_spread"],
-                "weights_mode": c["weights_mode"],
-            })
-
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка получения прогноза на неделю: {e}")
-        return
-
-    ai_prompt = f"""
-Локация:
-{location['name']}
-
-Прогноз на 7 дней:
-{daily_results}
-
-Дай краткий полезный вывод:
-- какие дни самые комфортные
-- когда выше риск дождя
-- когда лучше планировать поездку/прогулку
-- где прогноз спорный
-"""
-
-    ai_summary = get_ai_summary(ai_prompt)
-
-    message = (
-        f"📆 Прогноз на неделю\n"
-        f"📍 {location['name']}, {location['country']}\n\n"
-    )
-
-    for item in daily_results:
-        message += (
-            f"📅 {item['date']} ({item['weekday']})\n"
-            f"🌡 ~{item['avg_temp']}°C\n"
-            f"💨 ~{item['avg_wind']} км/ч\n"
-            f"☔ ~{item['avg_rain']}%\n"
-            f"✅ Temp: {item['temp_confidence']}, Rain: {item['rain_confidence']}\n"
-            f"📊 Rain spread: {item['rain_spread']}%\n\n"
-        )
-
-    message += (
-        f"⚙️ Режим: {daily_results[0]['weights_mode']}\n\n"
-        f"🤖 AI-вывод:\n"
-        f"{ai_summary}"
-    )
-
-    await update.message.reply_text(message)
-
-
-async def weekend_parts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context)
-
-    if not location:
-        await update.message.reply_text("Локация не найдена 😢")
-        return
-
-    today = datetime.now()
-    days_until_saturday = (5 - today.weekday()) % 7
-
-    if days_until_saturday == 0 and today.hour >= 18:
-        days_until_saturday = 7
-
-    saturday = today + timedelta(days=days_until_saturday)
-    sunday = saturday + timedelta(days=1)
-
-    saturday_date = saturday.strftime("%Y-%m-%d")
-    sunday_date = sunday.strftime("%Y-%m-%d")
-
-    try:
-        saturday_parts = get_hourly_parts_sources(location, saturday_date)
-        sunday_parts = get_hourly_parts_sources(location, sunday_date)
-
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка получения прогноза выходных по частям дня: {e}")
-        return
-
-    ai_prompt = f"""
-Локация:
-{location['name']}
-
-Выходные по частям дня.
-
-Суббота:
-{saturday_parts}
-
-Воскресенье:
-{sunday_parts}
-
-Дай практичный вывод:
-- какой день лучше для поездки/прогулки
-- когда выше риск дождя
-- когда лучше планировать активность на улице
-- брать ли зонт/дождевик
-- есть ли смысл ехать на природу
-"""
-
-    ai_summary = get_ai_summary(ai_prompt)
-
-    message = (
-        f"🏕 Выходные по частям дня\n"
-        f"📍 {location['name']}, {location['country']}\n\n"
-        f"📅 Суббота {saturday_date}\n"
-    )
-
-    for key in ["morning", "day", "evening", "night"]:
-        part = saturday_parts[key]
-        rain_confidence = "низкая" if part["rain"] >= 50 else "средняя" if part["rain"] >= 25 else "высокая"
-
-        message += (
-            f"{part['title']}\n"
-            f"🌡 ~{part['temp']}°C\n"
-            f"☔ Дождь: ~{part['rain']}%\n"
-            f"💨 Ветер: до ~{part['wind']} км/ч\n"
-            f"✅ Rain confidence: {rain_confidence}\n\n"
-        )
-
-    message += f"📅 Воскресенье {sunday_date}\n"
-
-    for key in ["morning", "day", "evening", "night"]:
-        part = sunday_parts[key]
-        rain_confidence = "низкая" if part["rain"] >= 50 else "средняя" if part["rain"] >= 25 else "высокая"
-
-        message += (
-            f"{part['title']}\n"
-            f"🌡 ~{part['temp']}°C\n"
-            f"☔ Дождь: ~{part['rain']}%\n"
-            f"💨 Ветер: до ~{part['wind']} км/ч\n"
-            f"✅ Rain confidence: {rain_confidence}\n\n"
-        )
-
-    message += (
-        f"🤖 AI-вывод:\n"
-        f"{ai_summary}"
-    )
-
-    await update.message.reply_text(message)
-
-
-async def week_parts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context)
-
-    if not location:
-        await update.message.reply_text("Локация не найдена 😢")
-        return
-
-    today = datetime.now()
-
-    week_data = []
-
-    try:
-        for i in range(7):
-            target_day = today + timedelta(days=i)
-            target_date = target_day.strftime("%Y-%m-%d")
-            parts = get_hourly_parts_sources(location, target_date)
-
-            day_summary = {
-                "date": target_date,
-                "weekday": target_day.strftime("%a"),
-                "parts": parts,
-            }
-
-            week_data.append(day_summary)
-
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка получения прогноза недели по частям дня: {e}")
-        return
-
-    ai_prompt = f"""
-Локация:
-{location['name']}
-
-Прогноз на неделю по частям дня:
-{week_data}
-
-Дай краткий полезный вывод:
-- какие дни лучше для прогулок/поездок
-- в какие дни и части дня выше риск дождя
-- где стоит брать зонт
-- какой день самый комфортный
-- какой день лучше избегать для активностей на улице
-"""
-
-    ai_summary = get_ai_summary(ai_prompt)
-
-    message = (
-        f"📆 Неделя по частям дня\n"
-        f"📍 {location['name']}, {location['country']}\n\n"
-    )
-
-    for day in week_data:
-        message += f"📅 {day['date']} ({day['weekday']})\n"
-
-        for key in ["morning", "day", "evening", "night"]:
-            part = day["parts"][key]
-
-            message += (
-                f"{part['title']}: "
-                f"🌡 ~{part['temp']}°C, "
-                f"☔ ~{part['rain']}%, "
-                f"💨 до ~{part['wind']} км/ч\n"
-            )
-
-        message += "\n"
-
-    message += (
         f"🤖 AI-вывод:\n"
         f"{ai_summary}"
     )
@@ -3187,589 +1429,20 @@ async def adaptive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message)
 
 
-def is_valid_time_string(value):
-    try:
-        hour_str, minute_str = value.split(":")
-        hour = int(hour_str)
-        minute = int(minute_str)
-
-        if 0 <= hour <= 23 and 0 <= minute <= 59:
-            return True
-
-        return False
-
-    except Exception:
-        return False
-
-
-async def set_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-
-    if not context.args:
-        user_settings = get_user_settings(chat_id)
-        current_key = user_settings.get("home_location_key", "home")
-        current_location = get_location_by_key(current_key)
-
-        available_locations = "\n".join(
-            [f"/set_home {key}" for key in FAVORITE_LOCATIONS.keys()]
-        )
-
-        await update.message.reply_text(
-            f"🏠 Текущая домашняя локация: {current_location['name']}\n\n"
-            f"Чтобы изменить, используй:\n"
-            f"{available_locations}\n\n"
-            f"Сейчас ключ: {current_key}\n\n"
-            f"Важно: это меняет home только для тебя."
-        )
-        return
-
-    location_key = context.args[0].lower()
-
-    if location_key not in FAVORITE_LOCATIONS:
-        await update.message.reply_text(
-            "Такой избранной локации нет 😢\n\n"
-            "Доступные варианты:\n"
-            "home, moscow_center, moscow_north, moscow_south, "
-            "moscow_west, moscow_east, sergiev, "
-            "kalyazin, khvoynaya, lyubytino"
-        )
-        return
-
-    update_user_setting(chat_id, "home_location_key", location_key)
-
-    location = FAVORITE_LOCATIONS[location_key]
-
-    await update.message.reply_text(
-        f"✅ Домашняя локация обновлена только для тебя.\n\n"
-        f"🏠 Теперь твой home: {location['name']}, {location['country']}\n\n"
-        f"У других пользователей home не изменится."
-    )
-
-
-async def set_morning_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-
-    if not context.args:
-        user_settings = get_user_settings(chat_id)
-
-        await update.message.reply_text(
-            f"🕒 Текущее время твоего утреннего прогноза: {user_settings.get('morning_time', '08:00')}\n\n"
-            f"Чтобы изменить, используй формат HH:MM:\n"
-            f"/set_morning_time 07:30\n"
-            f"/set_morning_time 09:00\n\n"
-            f"Важно: это меняет время только для тебя."
-        )
-        return
-
-    new_time = context.args[0].strip()
-
-    if not is_valid_time_string(new_time):
-        await update.message.reply_text(
-            "Неверный формат времени 😢\n\n"
-            "Используй формат HH:MM, например:\n"
-            "/set_morning_time 07:30"
-        )
-        return
-
-    update_user_setting(chat_id, "morning_time", new_time)
-
-    await update.message.reply_text(
-        f"✅ Время утреннего прогноза обновлено только для тебя.\n\n"
-        f"Теперь бот будет присылать тебе прогноз каждый день в {new_time} по Москве.\n\n"
-        f"Проверить настройки:\n"
-        f"/status"
-    )
-
-
-def format_best_temperature_model(scores_data):
-    rows = []
-
-    for model, data in scores_data.items():
-        checks = data.get("checks", 0)
-
-        if checks == 0:
-            continue
-
-        avg_error = round(data.get("total_error", 0) / checks, 2)
-        wins = data.get("wins", 0)
-        win_rate = round((wins / checks) * 100)
-
-        rows.append({
-            "model": model,
-            "checks": checks,
-            "avg_error": avg_error,
-            "wins": wins,
-            "win_rate": win_rate,
-        })
-
-    if not rows:
-        return None
-
-    rows = sorted(rows, key=lambda x: x["avg_error"])
-    return rows[0], rows
-
-
-def format_best_rain_model(rain_scores_data):
-    rows = []
-
-    for model, data in rain_scores_data.items():
-        checks = data.get("checks", 0)
-
-        if checks == 0:
-            continue
-
-        correct = data.get("correct", 0)
-        accuracy = round((correct / checks) * 100)
-        avg_error = round(data.get("total_error", 0) / checks, 1)
-        false_positive = data.get("false_positive", 0)
-        missed = data.get("missed", 0)
-
-        rows.append({
-            "model": model,
-            "checks": checks,
-            "accuracy": accuracy,
-            "avg_error": avg_error,
-            "false_positive": false_positive,
-            "missed": missed,
-        })
-
-    if not rows:
-        return None
-
-    rows = sorted(rows, key=lambda x: (-x["accuracy"], x["avg_error"]))
-    return rows[0], rows
-
-
-async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    history_items = load_history()
-    learning_items = load_learning_forecasts()
-    scores_data = load_scores()
-    rain_scores_data = load_rain_scores()
-    settings = load_settings()
-
-    adaptive_weights = get_adaptive_weights_from_scores()
-
-    temp_best_result = format_best_temperature_model(scores_data)
-    rain_best_result = format_best_rain_model(rain_scores_data)
-
-    total_history = len(history_items)
-    total_learning = len(learning_items)
-    verified_learning = len([item for item in learning_items if item.get("verified")])
-    pending_learning = total_learning - verified_learning
-
-    home_location = get_home_location()
-
-    learning_enabled = settings.get("learning_enabled", False)
-    morning_time = settings.get("morning_time", "08:00")
-
-    if temp_best_result:
-        best_temp, temp_rows = temp_best_result
-        temp_text = (
-            f"🏆 {best_temp['model']}\n"
-            f"Средняя ошибка: {best_temp['avg_error']}°C\n"
-            f"Проверок: {best_temp['checks']}, побед: {best_temp['wins']} ({best_temp['win_rate']}%)"
-        )
-    else:
-        temp_rows = []
-        temp_text = "Пока нет данных. Сделай /verify или включи /subscribe_learning."
-
-    if rain_best_result:
-        best_rain, rain_rows = rain_best_result
-        rain_text = (
-            f"🏆 {best_rain['model']}\n"
-            f"Accuracy: {best_rain['accuracy']}%\n"
-            f"Средняя ошибка rain score: {best_rain['avg_error']}\n"
-            f"False positive: {best_rain['false_positive']}, missed: {best_rain['missed']}"
-        )
-    else:
-        rain_rows = []
-        rain_text = "Пока нет данных. Сделай /verify_rain или включи /subscribe_learning."
-
-    if adaptive_weights:
-        adaptive_text = ""
-
-        for model, weight in sorted(adaptive_weights.items(), key=lambda x: x[1], reverse=True):
-            adaptive_text += f"— {model}: {round(weight * 100)}%\n"
-
-    else:
-        adaptive_text = "Пока недостаточно данных."
-
-    message = (
-        f"📊 AI Weather Dashboard\n\n"
-
-        f"🏠 Home: {home_location['name']}\n"
-        f"🌅 Morning time: {morning_time}\n"
-        f"🧠 Auto-learning: {'✅ включено' if learning_enabled else '❌ выключено'}\n\n"
-
-        f"📚 Data:\n"
-        f"История прогнозов: {total_history}\n"
-        f"Auto-learning прогнозов: {total_learning}\n"
-        f"Проверено auto-learning: {verified_learning}\n"
-        f"Ожидают проверки: {pending_learning}\n\n"
-
-        f"🌡 Temperature model leader:\n"
-        f"{temp_text}\n\n"
-
-        f"☔ Rain model leader:\n"
-        f"{rain_text}\n\n"
-
-        f"⚖️ Current adaptive weights:\n"
-        f"{adaptive_text}\n"
-    )
-
-    # Добавим короткий топ по температуре, если есть место.
-    if temp_rows:
-        message += "\n🌡 Top temperature models:\n"
-
-        for row in temp_rows[:5]:
-            message += (
-                f"— {row['model']}: "
-                f"{row['avg_error']}°C avg error, "
-                f"{row['checks']} checks\n"
-            )
-
-    if rain_rows:
-        message += "\n☔ Top rain models:\n"
-
-        for row in rain_rows[:5]:
-            message += (
-                f"— {row['model']}: "
-                f"{row['accuracy']}% accuracy, "
-                f"{row['avg_error']} avg error\n"
-            )
-
-    await update.message.reply_text(message)
-
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-
-    subscribers = load_morning_subscribers()
-    history_items = load_history()
-    scores_data = load_scores()
-    rain_scores_data = load_rain_scores()
-    user_settings = get_user_settings(chat_id)
-    home_location = get_user_home_location(chat_id)
-
-    current_subscription = None
-
-    for subscriber in subscribers:
-        if str(subscriber.get("chat_id")) == chat_id:
-            current_subscription = subscriber
-            break
-
-    adaptive_weights = get_adaptive_weights_from_scores()
-    adaptive_enabled = adaptive_weights is not None
-
-    total_model_checks = sum(
-        model.get("checks", 0)
-        for model in scores_data.values()
-    )
-
-    total_rain_checks = sum(
-        model.get("checks", 0)
-        for model in rain_scores_data.values()
-    )
-
-    if current_subscription:
-        location_key = current_subscription.get("location_key", "home")
-
-        if location_key == "home":
-            location = get_user_home_location(chat_id)
-        else:
-            location = get_location_by_key(location_key)
-
-        morning_status = (
-            f"✅ Включен\n"
-            f"📍 Локация: {location['name']}\n"
-            f"🕒 Время: {user_settings.get('morning_time', '08:00')} {user_settings.get('timezone', 'Europe/Moscow')}"
-        )
-    else:
-        morning_status = "❌ Отключен"
-
-    files_status = (
-        f"📁 weather_history.json\n"
-        f"📁 model_scores.json\n"
-        f"📁 rain_scores.json\n"
-        f"📁 morning_subscribers.json\n"
-        f"📁 settings.json\n"
-        f"📁 user_settings.json"
-    )
-
-    if adaptive_enabled:
-        best_model = max(adaptive_weights, key=adaptive_weights.get)
-        adaptive_text = (
-            f"✅ Активен\n"
-            f"🏆 Лучшая модель сейчас: {best_model}\n"
-            f"⚖️ Вес: {round(adaptive_weights[best_model] * 100)}%"
-        )
-    else:
-        adaptive_text = "❌ Пока недостаточно данных"
-
-    message = (
-        f"🧠 Статус AI Weather Assistant\n\n"
-
-        f"👤 User settings:\n"
-        f"Chat ID: {chat_id}\n"
-        f"🏠 Home: {home_location['name']} ({user_settings.get('home_location_key', 'home')})\n"
-        f"🕒 Morning time: {user_settings.get('morning_time', '08:00')} {user_settings.get('timezone', 'Europe/Moscow')}\n\n"
-
-        f"🌅 Morning alerts:\n"
-        f"{morning_status}\n\n"
-
-        f"📚 История прогнозов:\n"
-        f"Сохранено: {len(history_items)}\n\n"
-
-        f"📊 Проверки моделей:\n"
-        f"🌡 Temperature verify: {total_model_checks}\n"
-        f"☔ Rain verify: {total_rain_checks}\n\n"
-
-        f"⚙️ Adaptive weights:\n"
-        f"{adaptive_text}\n\n"
-
-        f"💾 Локальные файлы:\n"
-        f"{files_status}\n\n"
-
-        f"🖥 Режим работы:\n"
-        f"Cloud/Render autonomous mode"
-    )
-
-    await update.message.reply_text(message)
-
-
-async def check_morning_schedule(context: ContextTypes.DEFAULT_TYPE):
-    subscribers = load_morning_subscribers()
-
-    if not subscribers:
-        return
-
-    for subscriber in subscribers:
-        chat_id = str(subscriber.get("chat_id"))
-        user_settings = get_user_settings(chat_id)
-
-        timezone_name = user_settings.get("timezone", "Europe/Moscow")
-        morning_time = user_settings.get("morning_time", "08:00")
-        last_sent_date = user_settings.get("last_morning_sent_date", "")
-
-        if not is_valid_time_string(morning_time):
-            continue
-
-        now = datetime.now(ZoneInfo(timezone_name))
-        current_time = now.strftime("%H:%M")
-        current_date = now.strftime("%Y-%m-%d")
-
-        if current_time != morning_time:
-            continue
-
-        if last_sent_date == current_date:
-            continue
-
-        location_key = subscriber.get("location_key", "home")
-
-        if location_key == "home":
-            location = get_user_home_location(chat_id)
-        else:
-            location = get_location_by_key(location_key)
-
-        if not location:
-            continue
-
-        try:
-            message = build_morning_message_for_location(location)
-            await context.bot.send_message(
-                chat_id=int(chat_id),
-                text=message
-            )
-            update_user_setting(chat_id, "last_morning_sent_date", current_date)
-
-        except Exception as e:
-            await context.bot.send_message(
-                chat_id=int(chat_id),
-                text=f"Ошибка утреннего прогноза: {e}"
-            )
-
-
 async def favorite_current(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str):
     context.args = [key]
     await weather(update, context)
 
 
-
-
-async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context)
-
-    if not location:
-        await update.message.reply_text("Локация не найдена 😢")
-        return
-
-    today_date = datetime.now().strftime("%Y-%m-%d")
-    tomorrow_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-
-    try:
-        today_parts_data = get_hourly_parts_sources(location, today_date)
-        tomorrow_parts_data = get_hourly_parts_sources(location, tomorrow_date)
-
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка получения alerts: {e}")
-        return
-
-    today_alerts = build_alerts_from_parts(today_parts_data)
-    tomorrow_alerts = build_alerts_from_parts(tomorrow_parts_data)
-
-    today_best_key, today_best_score = get_best_part(today_parts_data)
-    tomorrow_best_key, tomorrow_best_score = get_best_part(tomorrow_parts_data)
-
-    today_best = today_parts_data[today_best_key]
-    tomorrow_best = tomorrow_parts_data[tomorrow_best_key]
-
-    ai_prompt = f"""
-Локация:
-{location['name']}
-
-Сегодня по частям дня:
-{today_parts_data}
-
-Завтра по частям дня:
-{tomorrow_parts_data}
-
-Предупреждения сегодня:
-{today_alerts}
-
-Предупреждения завтра:
-{tomorrow_alerts}
-
-Лучшее окно сегодня:
-{today_best}
-
-Лучшее окно завтра:
-{tomorrow_best}
-
-Дай короткий практичный вывод:
-- главные риски
-- лучшее окно сегодня
-- лучшее окно завтра
-- брать ли зонт
-- стоит ли переносить планы
-"""
-
-    ai_summary = get_ai_summary(ai_prompt)
-
-    message = (
-        f"⚠️ Smart Weather Alerts\n"
-        f"📍 {location['name']}, {location['country']}\n\n"
-        f"📅 Сегодня {today_date}\n"
-    )
-
-    for alert in today_alerts:
-        message += f"{alert}\n"
-
-    message += (
-        f"\n✅ Лучшее окно сегодня:\n"
-        f"{today_best.get('title')} — "
-        f"~{today_best.get('temp')}°C, "
-        f"дождь ~{today_best.get('rain')}%, "
-        f"ветер до ~{today_best.get('wind')} км/ч\n"
-        f"Score: {today_best_score}\n\n"
-        f"📅 Завтра {tomorrow_date}\n"
-    )
-
-    for alert in tomorrow_alerts:
-        message += f"{alert}\n"
-
-    message += (
-        f"\n✅ Лучшее окно завтра:\n"
-        f"{tomorrow_best.get('title')} — "
-        f"~{tomorrow_best.get('temp')}°C, "
-        f"дождь ~{tomorrow_best.get('rain')}%, "
-        f"ветер до ~{tomorrow_best.get('wind')} км/ч\n"
-        f"Score: {tomorrow_best_score}\n\n"
-        f"🤖 AI-вывод:\n"
-        f"{ai_summary}"
-    )
-
-    await update.message.reply_text(message)
-
-async def danger_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context)
-
-    if not location:
-        await update.message.reply_text("Локация не найдена 😢")
-        return
-
-    try:
-        events = detect_danger_events(location, hours_limit=48)
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка danger alerts: {e}")
-        return
-
-    if not events:
-        await update.message.reply_text(
-            f"🟢 Опасных погодных событий не найдено\n\n"
-            f"📍 {location['name']}, {location['country']}\n"
-            f"Период: ближайшие 48 часов"
-        )
-        return
-
-    message = build_danger_message(location, events, auto=False)
-
-    await update.message.reply_text(message)
-
-async def setup_bot_commands(app):
-    commands = [
-        BotCommand("weather", "Текущая погода"),
-        BotCommand("tomorrow", "Прогноз на завтра"),
-        BotCommand("weekend", "Прогноз на выходные"),
-        BotCommand("week", "Прогноз на неделю"),
-        BotCommand("today_parts", "Сегодня по частям дня"),
-        BotCommand("tomorrow_parts", "Завтра по частям дня"),
-        BotCommand("weekend_parts", "Выходные по частям дня"),
-        BotCommand("week_parts", "Неделя по частям дня"),
-        BotCommand("alerts", "Погодные alerts"),
-        BotCommand("danger_alerts", "Опасные погодные явления"),
-        BotCommand("subscribe_danger_alerts", "Подписка на danger alerts"),
-        BotCommand("unsubscribe_danger_alerts", "Отключить danger alerts"),
-        BotCommand("danger_status", "Статус danger alerts"),
-        BotCommand("morning", "Утренний прогноз"),
-        BotCommand("subscribe_morning", "Подписка на утренний прогноз"),
-        BotCommand("set_morning_time", "Время утреннего прогноза"),
-        BotCommand("trip", "Режим поездки"),
-        BotCommand("baidarka", "Режим байдарки"),
-        BotCommand("camping", "Режим палатки"),
-        BotCommand("dashboard", "Dashboard"),
-        BotCommand("scores", "Веса моделей"),
-        BotCommand("adaptive", "Adaptive weights"),
-        BotCommand("location_scores", "Learning по локациям"),
-        BotCommand("status", "Статус бота"),
-        BotCommand("set_home", "Изменить домашнюю локацию"),
-    ]
-
-    await app.bot.set_my_commands(commands)
-
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
-    app.post_init = setup_bot_commands
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("weather", weather))
-    app.add_handler(CommandHandler("alerts", alerts))
-    app.add_handler(CommandHandler("danger_alerts", danger_alerts))
-    app.add_handler(CommandHandler("subscribe_danger_alerts", subscribe_danger_alerts))
-    app.add_handler(CommandHandler("unsubscribe_danger_alerts", unsubscribe_danger_alerts))
-    app.add_handler(CommandHandler("danger_status", danger_status))
-    app.add_handler(CommandHandler("trip", trip))
-    app.add_handler(CommandHandler("baidarka", baidarka))
-    app.add_handler(CommandHandler("camping", camping))
-    app.add_handler(CommandHandler("morning", morning))
-    app.add_handler(CommandHandler("subscribe_morning", subscribe_morning))
-    app.add_handler(CommandHandler("unsubscribe_morning", unsubscribe_morning))
     app.add_handler(CommandHandler("today_parts", today_parts))
     app.add_handler(CommandHandler("tomorrow_parts", tomorrow_parts))
     app.add_handler(CommandHandler("tomorrow", tomorrow))
     app.add_handler(CommandHandler("weekend", weekend))
-    app.add_handler(CommandHandler("weekend_parts", weekend_parts))
-    app.add_handler(CommandHandler("week", week))
-    app.add_handler(CommandHandler("week_parts", week_parts))
     app.add_handler(CommandHandler("history", history))
     app.add_handler(CommandHandler("analyze", analyze))
     app.add_handler(CommandHandler("verify", verify))
@@ -3777,18 +1450,6 @@ def main():
     app.add_handler(CommandHandler("scores", scores))
     app.add_handler(CommandHandler("rain_scores", rain_scores))
     app.add_handler(CommandHandler("adaptive", adaptive))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("subscribe_learning", subscribe_learning))
-    app.add_handler(CommandHandler("unsubscribe_learning", unsubscribe_learning))
-    app.add_handler(CommandHandler("learning_status", learning_status))
-    app.add_handler(CommandHandler("location_scores", location_scores))
-    app.add_handler(CommandHandler("dashboard", dashboard))
-    app.add_handler(CommandHandler("learning_forecast_now", run_learning_forecast_now))
-    app.add_handler(CommandHandler("learning_verify_now", run_learning_verify_now))
-    app.add_handler(CommandHandler("learning_forecast_all_now", learning_forecast_all_now))
-    app.add_handler(CommandHandler("learning_verify_all_now", learning_verify_all_now))
-    app.add_handler(CommandHandler("set_home", set_home))
-    app.add_handler(CommandHandler("set_morning_time", set_morning_time))
 
     app.add_handler(CommandHandler("home", lambda update, context: favorite_current(update, context, "home")))
     app.add_handler(CommandHandler("moscow", lambda update, context: favorite_current(update, context, "moscow")))
@@ -3796,28 +1457,6 @@ def main():
     app.add_handler(CommandHandler("kalyazin", lambda update, context: favorite_current(update, context, "kalyazin")))
     app.add_handler(CommandHandler("khvoynaya", lambda update, context: favorite_current(update, context, "khvoynaya")))
     app.add_handler(CommandHandler("lyubytino", lambda update, context: favorite_current(update, context, "lyubytino")))
-
-    if app.job_queue:
-        app.job_queue.run_repeating(
-            check_morning_schedule,
-            interval=60,
-            first=5,
-            name="dynamic_morning_weather",
-        )
-
-        app.job_queue.run_repeating(
-            check_learning_schedule,
-            interval=60,
-            first=10,
-            name="auto_learning_engine",
-        )
-
-        app.job_queue.run_repeating(
-            check_danger_alerts_schedule,
-            interval=3600,
-            first=30,
-            name="danger_weather_monitor",
-        )
 
     print("Бот запущен...")
     app.run_polling()
