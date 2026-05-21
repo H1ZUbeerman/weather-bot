@@ -31,6 +31,9 @@ RAIN_SCORES_FILE = "rain_scores.json"
 
 
 USER_SETTINGS_FILE = "settings.json"
+MORNING_SUBSCRIBERS_FILE = "morning_subscribers.json"
+LEARNING_FILE = "learning_forecasts.json"
+DANGER_SUBSCRIBERS_FILE = "danger_subscribers.json"
 
 def load_user_settings():
     if not os.path.exists(USER_SETTINGS_FILE):
@@ -68,6 +71,16 @@ def get_home_location_for_chat(chat_id):
 
 def get_location_by_key(location_key):
     return FAVORITE_LOCATIONS.get(location_key, FAVORITE_LOCATIONS["home"])
+
+
+def build_location_options(current_key=None, command_prefix="/set_home"):
+    lines = []
+
+    for key, location in FAVORITE_LOCATIONS.items():
+        marker = " ← текущий" if key == current_key else ""
+        lines.append(f"{command_prefix} {key} — {location['name']}{marker}")
+
+    return "\n".join(lines)
 
 
 FAVORITE_LOCATIONS = {
@@ -124,6 +137,18 @@ def load_json_file(filename, default):
         return default
     with open(filename, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def count_json_items(filename):
+    data = load_json_file(filename, [])
+
+    if isinstance(data, list):
+        return len(data)
+
+    if isinstance(data, dict):
+        return len(data)
+
+    return 0
 
 
 def save_json_file(filename, data):
@@ -1536,10 +1561,18 @@ async def adaptive(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_settings = get_user_settings(chat_id)
+    home_key = user_settings.get("home_location_key", "home")
+    home_location = get_location_by_key(home_key)
+
     history_items = load_history()
     scores_data = load_scores()
     rain_scores_data = load_rain_scores()
     adaptive_weights = get_adaptive_weights_from_scores()
+    morning_subscribers_count = count_json_items(MORNING_SUBSCRIBERS_FILE)
+    danger_subscribers_count = count_json_items(DANGER_SUBSCRIBERS_FILE)
+    learning_forecasts_count = count_json_items(LEARNING_FILE)
 
     total_temp_checks = sum(
         data.get("checks", 0)
@@ -1586,10 +1619,21 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         best_rain_model = min(rain_avg_errors, key=rain_avg_errors.get)
 
     locations_list = ", ".join(FAVORITE_LOCATIONS.keys())
+    api_statuses = {
+        "Telegram": bool(TOKEN),
+        "WeatherAPI": bool(WEATHERAPI_KEY),
+        "Visual Crossing": bool(VISUALCROSSING_API_KEY),
+        "Meteosource": bool(METEOSOURCE_API_KEY),
+        "OpenAI": bool(OPENAI_API_KEY),
+    }
+    api_text = "\n".join(
+        f"{'✅' if is_enabled else '⚠️'} {name}"
+        for name, is_enabled in api_statuses.items()
+    )
 
     if adaptive_weights:
         weights_text = "\n".join(
-            [f"• {model}: {weight}" for model, weight in adaptive_weights.items()]
+            [f"• {model}: {round(weight * 100)}%" for model, weight in adaptive_weights.items()]
         )
         weights_mode = "adaptive"
     else:
@@ -1601,11 +1645,23 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         f"☁️ Режим работы:\n"
         f"✅ Cloud / Render\n"
-        f"✅ Telegram polling active\n\n"
+        f"✅ Telegram polling active\n"
+        f"✅ Python locked: 3.11.11\n\n"
+
+        f"🏠 Твой home:\n"
+        f"{home_location['name']} ({home_key})\n\n"
 
         f"📍 Локации:\n"
         f"Всего: {len(FAVORITE_LOCATIONS)}\n"
         f"{locations_list}\n\n"
+
+        f"🔑 Подключения:\n"
+        f"{api_text}\n\n"
+
+        f"🔔 Подписки и автоматика:\n"
+        f"🌅 Morning subscribers: {morning_subscribers_count}\n"
+        f"🚨 Danger subscribers: {danger_subscribers_count}\n"
+        f"🧪 Learning forecasts: {learning_forecasts_count}\n\n"
 
         f"📚 История прогнозов:\n"
         f"Сохранено: {len(history_items)}\n\n"
@@ -1640,6 +1696,11 @@ async def favorite_current(update: Update, context: ContextTypes.DEFAULT_TYPE, k
     await weather(update, context)
 
 
+async def favorite_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.args = []
+    await weather(update, context)
+
+
 
 async def locations(update: Update, context: ContextTypes.DEFAULT_TYPE):
     available_locations = "\n".join(
@@ -1658,31 +1719,30 @@ async def locations(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def set_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    user_settings = get_user_settings(chat_id)
+    current_key = user_settings.get("home_location_key", "home")
 
     if not context.args:
-        user_settings = get_user_settings(chat_id)
-        current_key = user_settings.get("home_location_key", "home")
         current_location = get_location_by_key(current_key) or FAVORITE_LOCATIONS["home"]
-
-        available_locations = "\n".join(
-            [f"/set_home {key}" for key in FAVORITE_LOCATIONS.keys()]
-        )
+        available_locations = build_location_options(current_key)
 
         await update.message.reply_text(
-            f"🏠 Текущая домашняя локация: {current_location['name']}\n\n"
-            f"Чтобы изменить, используй:\n"
+            f"🏠 Текущий home: {current_location['name']} ({current_key})\n\n"
+            f"Выбери новую домашнюю локацию:\n"
             f"{available_locations}\n\n"
-            f"Сейчас ключ: {current_key}\n\n"
-            f"Важно: это меняет home только для тебя."
+            f"Это меняет /home и /weather без аргументов только для тебя."
         )
         return
 
     location_key = context.args[0].lower()
 
     if location_key not in FAVORITE_LOCATIONS:
+        available_locations = build_location_options(current_key)
+
         await update.message.reply_text(
-            "Такой избранной локации нет 😢\n\n"
-            "Напиши /set_home, чтобы увидеть доступные варианты."
+            f"Такой избранной локации нет 😢\n\n"
+            f"Доступные варианты:\n"
+            f"{available_locations}"
         )
         return
 
@@ -1691,7 +1751,8 @@ async def set_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"✅ Домашняя локация обновлена только для тебя.\n\n"
-        f"🏠 Теперь твой home: {location['name']}, {location['country']}"
+        f"🏠 Теперь твой home: {location['name']}, {location['country']}\n\n"
+        f"Проверить: /home или /weather"
     )
 
 
@@ -1718,7 +1779,7 @@ def main():
     app.add_handler(CommandHandler("rain_scores", rain_scores))
     app.add_handler(CommandHandler("adaptive", adaptive))
 
-    app.add_handler(CommandHandler("home", lambda update, context: favorite_current(update, context, "home")))
+    app.add_handler(CommandHandler("home", favorite_home))
     app.add_handler(CommandHandler("moscow", lambda update, context: favorite_current(update, context, "moscow")))
     app.add_handler(CommandHandler("moscow_ilya", lambda update, context: favorite_current(update, context, "moscow_ilya")))
     app.add_handler(CommandHandler("sergiev", lambda update, context: favorite_current(update, context, "sergiev")))
