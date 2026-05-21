@@ -1,6 +1,7 @@
 import os
 import json
 import requests
+from ai_layer.reasoning import *
 from storage.user_settings import get_user_settings, update_user_setting
 from weather.messages import *
 from outdoor.messages import *
