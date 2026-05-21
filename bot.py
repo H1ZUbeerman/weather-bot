@@ -1613,6 +1613,21 @@ async def favorite_current(update: Update, context: ContextTypes.DEFAULT_TYPE, k
 
 
 
+async def locations(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    available_locations = "\n".join(
+        [f"• {key} — {location['name']}" for key, location in FAVORITE_LOCATIONS.items()]
+    )
+
+    await update.message.reply_text(
+        f"📍 Доступные локации:\n\n"
+        f"{available_locations}\n\n"
+        f"Чтобы выбрать дом:\n"
+        f"/set_home <ключ>\n\n"
+        f"Например:\n"
+        f"/set_home kalyazin"
+    )
+
+
 async def set_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
@@ -1662,6 +1677,7 @@ def main():
     app.add_handler(CommandHandler("tomorrow_parts", tomorrow_parts))
     app.add_handler(CommandHandler("tomorrow", tomorrow))
     app.add_handler(CommandHandler("set_home", set_home))
+    app.add_handler(CommandHandler("locations", locations))
     app.add_handler(CommandHandler("weekend", weekend))
     app.add_handler(CommandHandler("history", history))
     app.add_handler(CommandHandler("analyze", analyze))
@@ -1679,7 +1695,6 @@ def main():
     app.add_handler(CommandHandler("lyubytino", lambda update, context: favorite_current(update, context, "lyubytino")))
 
     print("Бот запущен...")
-    app.add_handler(CommandHandler("set_home", set_home))
     app.run_polling()
 
 
