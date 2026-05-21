@@ -3018,6 +3018,101 @@ async def favorite_current(update: Update, context: ContextTypes.DEFAULT_TYPE, k
 
 
 
+
+async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    location = get_location(context)
+
+    if not location:
+        await update.message.reply_text("Локация не найдена 😢")
+        return
+
+    today_date = datetime.now().strftime("%Y-%m-%d")
+    tomorrow_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    try:
+        today_parts_data = get_hourly_parts_sources(location, today_date)
+        tomorrow_parts_data = get_hourly_parts_sources(location, tomorrow_date)
+
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка получения alerts: {e}")
+        return
+
+    today_alerts = build_alerts_from_parts(today_parts_data)
+    tomorrow_alerts = build_alerts_from_parts(tomorrow_parts_data)
+
+    today_best_key, today_best_score = get_best_part(today_parts_data)
+    tomorrow_best_key, tomorrow_best_score = get_best_part(tomorrow_parts_data)
+
+    today_best = today_parts_data[today_best_key]
+    tomorrow_best = tomorrow_parts_data[tomorrow_best_key]
+
+    ai_prompt = f"""
+Локация:
+{location['name']}
+
+Сегодня по частям дня:
+{today_parts_data}
+
+Завтра по частям дня:
+{tomorrow_parts_data}
+
+Предупреждения сегодня:
+{today_alerts}
+
+Предупреждения завтра:
+{tomorrow_alerts}
+
+Лучшее окно сегодня:
+{today_best}
+
+Лучшее окно завтра:
+{tomorrow_best}
+
+Дай короткий практичный вывод:
+- главные риски
+- лучшее окно сегодня
+- лучшее окно завтра
+- брать ли зонт
+- стоит ли переносить планы
+"""
+
+    ai_summary = get_ai_summary(ai_prompt)
+
+    message = (
+        f"⚠️ Smart Weather Alerts\n"
+        f"📍 {location['name']}, {location['country']}\n\n"
+        f"📅 Сегодня {today_date}\n"
+    )
+
+    for alert in today_alerts:
+        message += f"{alert}\n"
+
+    message += (
+        f"\n✅ Лучшее окно сегодня:\n"
+        f"{today_best.get('title')} — "
+        f"~{today_best.get('temp')}°C, "
+        f"дождь ~{today_best.get('rain')}%, "
+        f"ветер до ~{today_best.get('wind')} км/ч\n"
+        f"Score: {today_best_score}\n\n"
+        f"📅 Завтра {tomorrow_date}\n"
+    )
+
+    for alert in tomorrow_alerts:
+        message += f"{alert}\n"
+
+    message += (
+        f"\n✅ Лучшее окно завтра:\n"
+        f"{tomorrow_best.get('title')} — "
+        f"~{tomorrow_best.get('temp')}°C, "
+        f"дождь ~{tomorrow_best.get('rain')}%, "
+        f"ветер до ~{tomorrow_best.get('wind')} км/ч\n"
+        f"Score: {tomorrow_best_score}\n\n"
+        f"🤖 AI-вывод:\n"
+        f"{ai_summary}"
+    )
+
+    await update.message.reply_text(message)
+
 async def danger_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     location = get_location(context)
 
@@ -3053,7 +3148,7 @@ async def setup_bot_commands(app):
         BotCommand("tomorrow_parts", "Завтра по частям дня"),
         BotCommand("weekend_parts", "Выходные по частям дня"),
         BotCommand("week_parts", "Неделя по частям дня"),
-        # BotCommand("alerts", "Погодные alerts"),
+        BotCommand("alerts", "Погодные alerts"),
         BotCommand("danger_alerts", "Опасные погодные явления"),
         BotCommand("subscribe_danger_alerts", "Подписка на danger alerts"),
         BotCommand("unsubscribe_danger_alerts", "Отключить danger alerts"),
@@ -3079,7 +3174,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("weather", weather))
-    # app.add_handler(CommandHandler("alerts", alerts))
+    app.add_handler(CommandHandler("alerts", alerts))
     app.add_handler(CommandHandler("danger_alerts", danger_alerts))
     app.add_handler(CommandHandler("subscribe_danger_alerts", subscribe_danger_alerts))
     app.add_handler(CommandHandler("unsubscribe_danger_alerts", unsubscribe_danger_alerts))
