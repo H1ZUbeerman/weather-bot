@@ -1336,7 +1336,7 @@ async def weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Ошибка получения погоды: {e}")
         return
 
-    ai_prompt = build_weather_prompt(location, c)
+    ai_prompt = build_practical_weather_reasoning_prompt(location, c)
 
     ai_summary = get_ai_summary(ai_prompt)
 
