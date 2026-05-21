@@ -8,9 +8,7 @@ from collections import Counter, defaultdict
 from dotenv import load_dotenv
 from openai import OpenAI
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
-from telegram.ext import CallbackQueryHandler
-from weather.keyboards import build_home_keyboard
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 load_dotenv()
 
@@ -1574,70 +1572,10 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message)
 
 
-
-
-async def set_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-
-    if context.args:
-        location_key = context.args[0].lower()
-
-        if location_key not in FAVORITE_LOCATIONS:
-            available = ", ".join(FAVORITE_LOCATIONS.keys())
-            await update.message.reply_text(
-                f"Такой избранной локации нет 😢\n\n"
-                f"Доступные варианты:\n{available}"
-            )
-            return
-
-        update_user_setting(chat_id, "home_location_key", location_key)
-        location = FAVORITE_LOCATIONS[location_key]
-
-        await update.message.reply_text(
-            f"✅ Домашняя локация обновлена только для тебя.\n\n"
-            f"🏠 Теперь твой home: {location['name']}, {location['country']}"
-        )
-        return
-
-    current_key = get_user_setting(chat_id, "home_location_key", "home")
-    current_location = FAVORITE_LOCATIONS.get(current_key, FAVORITE_LOCATIONS["home"])
-
-    await update.message.reply_text(
-        f"🏠 Текущая домашняя локация: {current_location['name']}\n\n"
-        f"Выбери новую домашнюю локацию:",
-        reply_markup=build_home_keyboard(),
-    )
-
 async def favorite_current(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str):
     context.args = [key]
     await weather(update, context)
 
-
-
-
-async def handle_home_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    chat_id = query.message.chat_id
-    data = query.data
-
-    if not data.startswith("set_home:"):
-        return
-
-    location_key = data.replace("set_home:", "")
-
-    if location_key not in FAVORITE_LOCATIONS:
-        await query.edit_message_text("Локация не найдена 😢")
-        return
-
-    update_user_setting(chat_id, "home_location_key", location_key)
-    location = FAVORITE_LOCATIONS[location_key]
-
-    await query.edit_message_text(
-        f"✅ Домашняя локация обновлена только для тебя.\n\n"
-        f"🏠 Теперь твой home: {location['name']}, {location['country']}"
-    )
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
@@ -1656,8 +1594,6 @@ def main():
     app.add_handler(CommandHandler("scores", scores))
     app.add_handler(CommandHandler("rain_scores", rain_scores))
     app.add_handler(CommandHandler("adaptive", adaptive))
-    app.add_handler(CommandHandler("set_home", set_home))
-    app.add_handler(CallbackQueryHandler(handle_home_callback, pattern="^set_home:"))
 
     app.add_handler(CommandHandler("home", lambda update, context: favorite_current(update, context, "home")))
     app.add_handler(CommandHandler("moscow", lambda update, context: favorite_current(update, context, "moscow")))
