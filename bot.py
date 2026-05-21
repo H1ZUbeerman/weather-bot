@@ -35,6 +35,28 @@ MORNING_SUBSCRIBERS_FILE = "morning_subscribers.json"
 LEARNING_FILE = "learning_forecasts.json"
 DANGER_SUBSCRIBERS_FILE = "danger_subscribers.json"
 DEFAULT_TIMEZONE = "Europe/Moscow"
+PROFILE_OPTIONS = {
+    "cold": {
+        "title": "я мерзну",
+        "instruction": "Пользователь мерзнет: советуй одеваться немного теплее обычного, особенно утром и вечером.",
+    },
+    "car": {
+        "title": "я на машине",
+        "instruction": "Пользователь на машине: обращай внимание на дождь, ветер, видимость, скользкую дорогу и время для поездки.",
+    },
+    "rain": {
+        "title": "важны дожди",
+        "instruction": "Пользователю особенно важны дожди: говори про риск осадков строже и явно советуй зонт/дождевик.",
+    },
+    "camping": {
+        "title": "палатка",
+        "instruction": "Пользователь планирует палатку: выделяй ночную температуру, дождь вечером/ночью, ветер и запасной план.",
+    },
+    "kayak": {
+        "title": "байдарка",
+        "instruction": "Пользователь планирует байдарку: отдельно оцени ветер, порывы, грозу, дождь и безопасность на воде.",
+    },
+}
 
 def load_user_settings():
     if not os.path.exists(USER_SETTINGS_FILE):
@@ -88,6 +110,47 @@ def build_location_options(current_key=None, command_prefix="/set_home"):
         lines.append(f"{command_prefix} {key} — {location['name']}{marker}")
 
     return "\n".join(lines)
+
+
+def normalize_profile_keys(raw_profiles):
+    if not isinstance(raw_profiles, list):
+        return []
+
+    return [
+        profile
+        for profile in raw_profiles
+        if profile in PROFILE_OPTIONS
+    ]
+
+
+def get_user_profiles(chat_id):
+    settings = get_user_settings(chat_id)
+    return normalize_profile_keys(settings.get("profiles", []))
+
+
+def save_user_profiles(chat_id, profiles):
+    update_user_setting(chat_id, "profiles", normalize_profile_keys(profiles))
+
+
+def build_profile_text(profiles):
+    if not profiles:
+        return "не настроен"
+
+    return ", ".join(PROFILE_OPTIONS[profile]["title"] for profile in profiles)
+
+
+def build_profile_instructions(chat_id):
+    profiles = get_user_profiles(chat_id)
+
+    if not profiles:
+        return "Профиль пользователя: не настроен."
+
+    instructions = "\n".join(
+        f"- {PROFILE_OPTIONS[profile]['instruction']}"
+        for profile in profiles
+    )
+
+    return f"Профиль пользователя:\n{instructions}"
 
 
 FAVORITE_LOCATIONS = {
@@ -876,6 +939,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/learning_status\n"
         "/learning_now\n"
         "/learning_verify_now\n"
+        "/profile\n"
         "/status\n\n"
         "Локации:\n"
         "/home\n"
@@ -889,7 +953,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context, chat_id=update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    location = get_location(context, chat_id=chat_id)
 
     if not location:
         await update.message.reply_text("Локация не найдена 😢")
@@ -927,6 +992,8 @@ Consensus:
 {c['rain_confidence']}
 
 Сделай краткий полезный вывод. Обязательно скажи, брать ли зонт.
+
+{build_profile_instructions(chat_id)}
 """
 
     ai_summary = get_ai_summary(ai_prompt)
@@ -978,7 +1045,8 @@ Consensus:
 
 
 async def today_parts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context, chat_id=update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    location = get_location(context, chat_id=chat_id)
 
     if not location:
         await update.message.reply_text("Локация не найдена 😢")
@@ -1002,6 +1070,8 @@ async def today_parts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - когда выше риск дождя
 - брать ли зонт
 - как одеться утром/днем/вечером
+
+{build_profile_instructions(chat_id)}
 """
 
     ai_summary = get_ai_summary(ai_prompt)
@@ -1032,7 +1102,8 @@ async def today_parts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def tomorrow_parts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context, chat_id=update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    location = get_location(context, chat_id=chat_id)
 
     if not location:
         await update.message.reply_text("Локация не найдена 😢")
@@ -1058,6 +1129,8 @@ async def tomorrow_parts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - когда выше риск дождя
 - брать ли зонт или дождевик
 - как одеться утром/днем/вечером
+
+{build_profile_instructions(chat_id)}
 """
 
     ai_summary = get_ai_summary(ai_prompt)
@@ -1087,7 +1160,7 @@ async def tomorrow_parts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message)
 
 
-def build_morning_briefing(location):
+def build_morning_briefing(location, chat_id=None):
     current = get_current_sources(location)
     c = build_consensus(location, current)
     parts = get_hourly_parts_sources(location)
@@ -1114,6 +1187,8 @@ def build_morning_briefing(location):
 - когда лучше выходить
 - есть ли риск дождя вечером
 - стоит ли планировать прогулку или дела на улице
+
+{build_profile_instructions(chat_id) if chat_id is not None else "Профиль пользователя: не настроен."}
 """
 
     ai_summary = get_ai_summary(ai_prompt)
@@ -1269,7 +1344,8 @@ def verify_pending_learning_forecasts():
 
 
 async def tomorrow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context, chat_id=update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    location = get_location(context, chat_id=chat_id)
 
     if not location:
         await update.message.reply_text("Локация не найдена 😢")
@@ -1331,6 +1407,8 @@ async def tomorrow(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - брать ли зонт
 - как одеваться утром/днем/вечером
 - стоит ли ехать на природу
+
+{build_profile_instructions(chat_id)}
 """
 
     ai_summary = get_ai_summary(ai_prompt)
@@ -1392,7 +1470,8 @@ async def tomorrow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message)
 
 async def weekend(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = get_location(context, chat_id=update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    location = get_location(context, chat_id=chat_id)
 
     if not location:
         await update.message.reply_text("Локация не найдена 😢")
@@ -1443,6 +1522,8 @@ Rain spread {sun['rain_spread']}
 - какой день лучше
 - брать ли зонт/дождевик
 - комфортно ли для прогулки/поездки
+
+{build_profile_instructions(chat_id)}
 """
 
     ai_summary = get_ai_summary(ai_prompt)
@@ -1811,6 +1892,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_settings = get_user_settings(chat_id)
     home_key = user_settings.get("home_location_key", "home")
     home_location = get_location_by_key(home_key)
+    profiles = get_user_profiles(chat_id)
 
     history_items = load_history()
     scores_data = load_scores()
@@ -1896,6 +1978,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         f"🏠 Твой home:\n"
         f"{home_location['name']} ({home_key})\n\n"
+
+        f"👤 Профиль:\n"
+        f"{build_profile_text(profiles)}\n\n"
 
         f"📍 Локации:\n"
         f"Всего: {len(FAVORITE_LOCATIONS)}\n"
@@ -1999,6 +2084,56 @@ async def set_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ Домашняя локация обновлена только для тебя.\n\n"
         f"🏠 Теперь твой home: {location['name']}, {location['country']}\n\n"
         f"Проверить: /home или /weather"
+    )
+
+
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    profiles = get_user_profiles(chat_id)
+
+    if not context.args:
+        options_text = "\n".join(
+            f"/profile {key} — {'выключить' if key in profiles else 'включить'}: {data['title']}"
+            for key, data in PROFILE_OPTIONS.items()
+        )
+
+        await update.message.reply_text(
+            f"👤 Твой профиль погоды\n\n"
+            f"Сейчас: {build_profile_text(profiles)}\n\n"
+            f"{options_text}\n"
+            f"/profile reset — сбросить профиль"
+        )
+        return
+
+    option = context.args[0].lower()
+
+    if option == "reset":
+        save_user_profiles(chat_id, [])
+        await update.message.reply_text("✅ Профиль сброшен.")
+        return
+
+    if option not in PROFILE_OPTIONS:
+        available = ", ".join(PROFILE_OPTIONS.keys())
+
+        await update.message.reply_text(
+            f"Такого профиля нет 😢\n\n"
+            f"Доступные варианты: {available}\n"
+            f"Например: /profile cold"
+        )
+        return
+
+    if option in profiles:
+        profiles.remove(option)
+        action = "выключен"
+    else:
+        profiles.append(option)
+        action = "включён"
+
+    save_user_profiles(chat_id, profiles)
+
+    await update.message.reply_text(
+        f"✅ Профиль «{PROFILE_OPTIONS[option]['title']}» {action}.\n\n"
+        f"Сейчас: {build_profile_text(profiles)}"
     )
 
 
@@ -2109,7 +2244,7 @@ async def morning_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         location = get_home_location_for_chat(chat_id)
 
     try:
-        message = build_morning_briefing(location)
+        message = build_morning_briefing(location, chat_id)
     except Exception as e:
         await update.message.reply_text(f"Не смог собрать утренний брифинг: {e}")
         return
@@ -2141,7 +2276,7 @@ async def check_morning_alerts(context: ContextTypes.DEFAULT_TYPE):
                 continue
 
             location = resolve_subscriber_location(subscriber)
-            message = build_morning_briefing(location)
+            message = build_morning_briefing(location, subscriber.get("chat_id"))
 
             await context.bot.send_message(
                 chat_id=subscriber["chat_id"],
@@ -2349,6 +2484,7 @@ def main():
     app.add_handler(CommandHandler("tomorrow", tomorrow))
     app.add_handler(CommandHandler("set_home", set_home))
     app.add_handler(CommandHandler("locations", locations))
+    app.add_handler(CommandHandler("profile", profile))
     app.add_handler(CommandHandler("morning_on", morning_on))
     app.add_handler(CommandHandler("morning_off", morning_off))
     app.add_handler(CommandHandler("morning_time", morning_time))
