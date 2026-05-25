@@ -1613,27 +1613,32 @@ def build_morning_briefing(location, chat_id=None):
         f"🌅 Утренний брифинг\n"
         f"📍 {location['name']}, {location['country']}\n\n"
 
-        f"📌 Сейчас:\n"
-        f"🌡 ~{c['avg_temp']}°C\n"
-        f"💨 ~{c['avg_wind']} км/ч\n"
-        f"☔ ~{c['avg_rain']}\n"
-        f"✅ Temp: {c['temp_confidence']}, Rain: {c['rain_confidence']}\n\n"
+        f"🤖 Коротко:\n"
+        f"{ai_summary}\n\n"
 
-        f"🕒 Сегодня:\n"
+        f"📌 Сейчас:\n"
+        f"🌡 ~{c['avg_temp']}°C, "
+        f"💨 ~{c['avg_wind']} км/ч, "
+        f"☔ ~{c['avg_rain']} — {rain_advice(c['avg_rain'])}\n"
+        f"✅ Надежность: температура — {c['temp_confidence']}, дождь — {c['rain_confidence']}\n\n"
+
+        f"🕒 Сегодня по частям дня:\n"
     )
 
     for key in ["morning", "day", "evening", "night"]:
         part = parts.get(key, {})
+        temp = part.get("temp")
+        rain = part.get("rain")
+        wind = part.get("wind")
         message += (
             f"{part.get('title', key)}: "
-            f"~{part.get('temp')}°C, "
-            f"дождь ~{part.get('rain')}%, "
-            f"ветер до ~{part.get('wind')} км/ч\n"
+            f"🌡 ~{temp}°C, "
+            f"☔ ~{rain}%, "
+            f"💨 до ~{wind} км/ч — {part_status(temp, rain, wind)}\n"
         )
 
     message += (
-        f"\n🤖 AI-вывод:\n"
-        f"{ai_summary}"
+        f"\n📊 Режим весов: {c['weights_mode']}"
     )
 
     return message
