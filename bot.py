@@ -1,6 +1,7 @@
 import os
 import json
 import requests
+from io import BytesIO
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -37,6 +38,16 @@ LEARNING_FILE = "learning_forecasts.json"
 DANGER_SUBSCRIBERS_FILE = "danger_subscribers.json"
 RAIN_ALERT_SUBSCRIBERS_FILE = "rain_alert_subscribers.json"
 DEFAULT_TIMEZONE = "Europe/Moscow"
+EXPORT_FILES = [
+    USER_SETTINGS_FILE,
+    MORNING_SUBSCRIBERS_FILE,
+    RAIN_ALERT_SUBSCRIBERS_FILE,
+    LEARNING_FILE,
+    SCORES_FILE,
+    RAIN_SCORES_FILE,
+    HISTORY_FILE,
+    DANGER_SUBSCRIBERS_FILE,
+]
 PROFILE_OPTIONS = {
     "cold": {
         "title": "я мерзну",
@@ -172,6 +183,20 @@ def build_profile_instructions(chat_id):
     )
 
     return f"Профиль пользователя:\n{instructions}"
+
+
+def build_export_payload():
+    exported_at = datetime.now(ZoneInfo(DEFAULT_TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
+    files = {}
+
+    for filename in EXPORT_FILES:
+        files[filename] = load_json_file(filename, None)
+
+    return {
+        "exported_at": exported_at,
+        "data_dir": str(DATA_DIR),
+        "files": files,
+    }
 
 
 FAVORITE_LOCATIONS = {
@@ -1278,7 +1303,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/scores — точность моделей по температуре\n"
         "/rain_scores — точность моделей по дождю\n"
         "/adaptive — текущие веса моделей\n"
-        "/history — последние прогнозы"
+        "/history — последние прогнозы\n"
+        "/export_all — резервная копия данных"
     )
 
 
@@ -1304,6 +1330,7 @@ BOT_COMMANDS = [
     BotCommand("learning_add", "добавить локацию в авто-обучение"),
     BotCommand("learning_locations", "локации авто-обучения"),
     BotCommand("learning_now", "сохранить learning-прогноз сейчас"),
+    BotCommand("export_all", "выгрузить резервную копию данных"),
 ]
 
 
@@ -2454,6 +2481,24 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message)
 
 
+async def export_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    payload = build_export_payload()
+    timestamp = datetime.now(ZoneInfo(DEFAULT_TIMEZONE)).strftime("%Y%m%d_%H%M%S")
+    filename = f"weather_bot_backup_{timestamp}.json"
+    content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    backup_file = BytesIO(content)
+    backup_file.name = filename
+
+    await update.message.reply_document(
+        document=backup_file,
+        filename=filename,
+        caption=(
+            "💾 Резервная копия данных бота.\n"
+            "Сохрани файл в Telegram или скачай на компьютер."
+        ),
+    )
+
+
 async def favorite_current(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str):
     context.args = [key]
     await weather(update, context)
@@ -3164,6 +3209,7 @@ def main():
     app.add_handler(CommandHandler("scores", scores))
     app.add_handler(CommandHandler("rain_scores", rain_scores))
     app.add_handler(CommandHandler("adaptive", adaptive))
+    app.add_handler(CommandHandler("export_all", export_all))
 
     app.add_handler(CommandHandler("home", favorite_home))
     app.add_handler(CommandHandler("moscow", lambda update, context: favorite_current(update, context, "moscow")))
