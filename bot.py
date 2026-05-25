@@ -1218,6 +1218,16 @@ def rain_advice(avg_rain):
     return "зонт скорее не нужен"
 
 
+def part_status(temp, rain, wind):
+    if rain >= 70 or wind >= 30:
+        return "🔴 рискованно"
+    if rain >= 45 or wind >= 20:
+        return "🟠 осторожно"
+    if rain >= 25 or wind >= 15:
+        return "🟡 нормально, но следить"
+    return "🟢 комфортно"
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🌦 AI Weather Assistant\n\n"
@@ -1537,14 +1547,17 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = (
         f"📆 Прогноз на неделю\n"
-        f"📍 {location['name']}, {location['country']}\n"
-        f"Источник: Open-Meteo hourly\n\n"
+        f"📍 {location['name']}, {location['country']}\n\n"
+        f"🤖 Коротко:\n"
+        f"{ai_summary}\n\n"
+        f"🗓 По дням:\n"
     )
 
     for item in week_items:
         message += (
             f"📅 {item['date']} ({item['weekday']})\n"
-            f"Итого: 🌡 ~{item['temp']}°C, ☔ до ~{item['rain']}%, 💨 до ~{item['wind']} км/ч\n"
+            f"Итого: 🌡 ~{item['temp']}°C, ☔ до ~{item['rain']}%, 💨 до ~{item['wind']} км/ч "
+            f"{part_status(item['temp'], item['rain'], item['wind'])}\n"
         )
 
         for key in ["morning", "day", "evening", "night"]:
@@ -1558,10 +1571,7 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         message += "\n"
 
-    message += (
-        f"🤖 AI-вывод:\n"
-        f"{ai_summary}"
-    )
+    message += "Источник: Open-Meteo hourly"
 
     await update.message.reply_text(message)
 
@@ -1824,42 +1834,15 @@ async def tomorrow(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📅 Прогноз на завтра\n"
         f"📍 {location['name']}, {location['country']}\n\n"
 
-        f"🧠 Общий consensus:\n"
+        f"🤖 Коротко:\n"
+        f"{ai_summary}\n\n"
+
+        f"🧠 Итог по 5 источникам:\n"
         f"🌡 ~{c['avg_temp']}°C\n"
         f"💨 ~{c['avg_wind']} км/ч\n"
-        f"☔ ~{c['avg_rain']}%\n"
-        f"📊 Temp spread: {c['temp_spread']}°C\n"
-        f"📊 Rain spread: {c['rain_spread']}%\n"
-        f"✅ Temp confidence: {c['temp_confidence']}\n"
-        f"✅ Rain confidence: {c['rain_confidence']}\n"
-        f"⚙️ Режим: {c['weights_mode']}\n\n"
-
-        f"🕒 Завтра по частям дня:\n\n"
+        f"☔ ~{c['avg_rain']}% — {rain_advice(c['avg_rain'])}\n"
+        f"✅ Надежность: температура — {c['temp_confidence']}, дождь — {c['rain_confidence']}\n\n"
     )
-
-    for key in ["morning", "day", "evening", "night"]:
-        part = parts.get(key, {})
-        title = part.get("title", key)
-        temp = part.get("temp", 0)
-        rain = part.get("rain", 0)
-        wind = part.get("wind", 0)
-
-        if rain >= 70 or wind >= 30:
-            status = "🔴 рискованно"
-        elif rain >= 45 or wind >= 20:
-            status = "🟠 осторожно"
-        elif rain >= 25 or wind >= 15:
-            status = "🟡 нормально, но следить"
-        else:
-            status = "🟢 комфортно"
-
-        message += (
-            f"{title}\n"
-            f"🌡 ~{temp}°C\n"
-            f"☔ Дождь: ~{rain}%\n"
-            f"💨 Ветер: до ~{wind} км/ч\n"
-            f"{status}\n\n"
-        )
 
     if best_part:
         message += (
@@ -1869,9 +1852,29 @@ async def tomorrow(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💨 ~{best_part.get('wind')} км/ч\n\n"
         )
 
+    message += "🕒 Завтра по частям дня:\n"
+
+    for key in ["morning", "day", "evening", "night"]:
+        part = parts.get(key, {})
+        title = part.get("title", key)
+        temp = part.get("temp", 0)
+        rain = part.get("rain", 0)
+        wind = part.get("wind", 0)
+
+        status = part_status(temp, rain, wind)
+
+        message += (
+            f"{title}: "
+            f"🌡 ~{temp}°C, "
+            f"☔ ~{rain}%, "
+            f"💨 до ~{wind} км/ч — {status}\n"
+        )
+
     message += (
-        f"🤖 AI-вывод:\n"
-        f"{ai_summary}"
+        f"\n📊 Разброс моделей:\n"
+        f"Температура: {c['temp_spread']}°C\n"
+        f"Дождь: {c['rain_spread']}%\n"
+        f"Весовой режим: {c['weights_mode']}"
     )
 
     await update.message.reply_text(message)
