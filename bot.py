@@ -1,7 +1,8 @@
 import os
 import json
+import csv
 import requests
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -197,6 +198,65 @@ def build_export_payload():
         "data_dir": str(DATA_DIR),
         "files": files,
     }
+
+
+def build_learning_csv():
+    forecasts = load_learning_forecasts()
+    output = StringIO()
+    fieldnames = [
+        "id",
+        "chat_id",
+        "date",
+        "created_at",
+        "verified",
+        "verified_at",
+        "location",
+        "location_key",
+        "source",
+        "predicted_temp",
+        "factual_temp",
+        "temp_error",
+        "predicted_rain",
+        "factual_rain",
+        "rain_error",
+        "weights_mode",
+        "temp_confidence",
+        "rain_confidence",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+
+    for item in forecasts:
+        forecast = item.get("forecast", {})
+        temperatures = forecast.get("temperatures", {})
+        rain_values = forecast.get("rain", {})
+        temp_errors = item.get("temperature_errors", {})
+        rain_errors = item.get("rain_errors", {})
+        sources = sorted(set(temperatures.keys()) | set(rain_values.keys()))
+
+        for source in sources:
+            writer.writerow({
+                "id": item.get("id", ""),
+                "chat_id": item.get("chat_id", ""),
+                "date": item.get("date", ""),
+                "created_at": item.get("created_at", ""),
+                "verified": item.get("verified", False),
+                "verified_at": item.get("verified_at", ""),
+                "location": item.get("location", ""),
+                "location_key": item.get("location_key", ""),
+                "source": source,
+                "predicted_temp": temperatures.get(source, ""),
+                "factual_temp": item.get("factual_temperature", ""),
+                "temp_error": temp_errors.get(source, ""),
+                "predicted_rain": rain_values.get(source, ""),
+                "factual_rain": item.get("factual_rain_score", ""),
+                "rain_error": rain_errors.get(source, ""),
+                "weights_mode": forecast.get("weights_mode", ""),
+                "temp_confidence": forecast.get("temperature_confidence", ""),
+                "rain_confidence": forecast.get("rain_confidence", ""),
+            })
+
+    return output.getvalue()
 
 
 FAVORITE_LOCATIONS = {
@@ -1304,7 +1364,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/rain_scores — точность моделей по дождю\n"
         "/adaptive — текущие веса моделей\n"
         "/history — последние прогнозы\n"
-        "/export_all — резервная копия данных"
+        "/export_all — резервная копия данных\n"
+        "/export_learning_csv — learning в таблицу"
     )
 
 
@@ -1331,6 +1392,7 @@ BOT_COMMANDS = [
     BotCommand("learning_locations", "локации авто-обучения"),
     BotCommand("learning_now", "сохранить learning-прогноз сейчас"),
     BotCommand("export_all", "выгрузить резервную копию данных"),
+    BotCommand("export_learning_csv", "выгрузить learning в CSV"),
 ]
 
 
@@ -2499,6 +2561,23 @@ async def export_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def export_learning_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    csv_text = build_learning_csv()
+    timestamp = datetime.now(ZoneInfo(DEFAULT_TIMEZONE)).strftime("%Y%m%d_%H%M%S")
+    filename = f"weather_bot_learning_{timestamp}.csv"
+    csv_file = BytesIO(csv_text.encode("utf-8-sig"))
+    csv_file.name = filename
+
+    await update.message.reply_document(
+        document=csv_file,
+        filename=filename,
+        caption=(
+            "📊 Learning export в CSV.\n"
+            "Можно открыть в Excel, Numbers или загрузить в Google Sheets."
+        ),
+    )
+
+
 async def favorite_current(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str):
     context.args = [key]
     await weather(update, context)
@@ -3210,6 +3289,7 @@ def main():
     app.add_handler(CommandHandler("rain_scores", rain_scores))
     app.add_handler(CommandHandler("adaptive", adaptive))
     app.add_handler(CommandHandler("export_all", export_all))
+    app.add_handler(CommandHandler("export_learning_csv", export_learning_csv))
 
     app.add_handler(CommandHandler("home", favorite_home))
     app.add_handler(CommandHandler("moscow", lambda update, context: favorite_current(update, context, "moscow")))
