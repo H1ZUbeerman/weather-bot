@@ -259,6 +259,104 @@ def build_learning_csv():
     return output.getvalue()
 
 
+def average(values):
+    values = [value for value in values if value is not None]
+
+    if not values:
+        return None
+
+    return round(sum(values) / len(values), 2)
+
+
+def format_avg_error(value, suffix=""):
+    if value is None:
+        return "нет данных"
+
+    return f"{value}{suffix}"
+
+
+def build_learning_report_text():
+    forecasts = load_learning_forecasts()
+    verified_items = [item for item in forecasts if item.get("verified")]
+    pending_count = len(forecasts) - len(verified_items)
+    temp_errors_by_source = defaultdict(list)
+    rain_errors_by_source = defaultdict(list)
+    location_counter = Counter()
+
+    for item in verified_items:
+        location_counter[item.get("location", "unknown")] += 1
+
+        for source, error in item.get("temperature_errors", {}).items():
+            temp_errors_by_source[source].append(error)
+
+        for source, error in item.get("rain_errors", {}).items():
+            if source != "consensus":
+                rain_errors_by_source[source].append(error)
+
+    temp_rows = sorted(
+        [
+            (source, len(errors), average(errors))
+            for source, errors in temp_errors_by_source.items()
+        ],
+        key=lambda row: row[2] if row[2] is not None else 999,
+    )
+    rain_rows = sorted(
+        [
+            (source, len(errors), average(errors))
+            for source, errors in rain_errors_by_source.items()
+        ],
+        key=lambda row: row[2] if row[2] is not None else 999,
+    )
+
+    message = (
+        f"🧪 Learning report\n\n"
+        f"Всего записей: {len(forecasts)}\n"
+        f"Проверено: {len(verified_items)}\n"
+        f"Ждут проверки: {pending_count}\n\n"
+    )
+
+    if temp_rows:
+        message += "🌡 Температура: средняя ошибка\n"
+
+        for source, checks, avg_error in temp_rows[:6]:
+            message += f"• {source}: {format_avg_error(avg_error, '°C')} ({checks} проверок)\n"
+
+        message += "\n"
+    else:
+        message += "🌡 Температура: пока нет проверенных данных\n\n"
+
+    if rain_rows:
+        message += "☔ Дождь: средняя ошибка rain score\n"
+
+        for source, checks, avg_error in rain_rows[:6]:
+            message += f"• {source}: {format_avg_error(avg_error)} ({checks} проверок)\n"
+
+        message += "\n"
+    else:
+        message += "☔ Дождь: пока нет проверенных данных\n\n"
+
+    if location_counter:
+        message += "📍 Локации с проверками\n"
+
+        for location, count in location_counter.most_common(5):
+            message += f"• {location}: {count}\n"
+
+        message += "\n"
+
+    if verified_items:
+        message += "🕒 Последние проверки\n"
+
+        for item in verified_items[-3:][::-1]:
+            message += (
+                f"• {item.get('verified_at', 'нет даты')} — {item.get('location', 'unknown')}: "
+                f"факт {item.get('factual_temperature', '—')}°C, "
+                f"rain {item.get('factual_rain_score', '—')}, "
+                f"лучшая t: {item.get('best_temperature_model', '—')}\n"
+            )
+
+    return message
+
+
 FAVORITE_LOCATIONS = {
     "home": {"latitude": 55.904068, "longitude": 37.640018, "name": "Дом", "country": "Россия", "region_type": "moscow"},
     "moscow": {"latitude": 55.7558, "longitude": 37.6173, "name": "Москва", "country": "Россия", "region_type": "moscow"},
@@ -1365,7 +1463,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/adaptive — текущие веса моделей\n"
         "/history — последние прогнозы\n"
         "/export_all — резервная копия данных\n"
-        "/export_learning_csv — learning в таблицу"
+        "/export_learning_csv — learning в таблицу\n"
+        "/learning_report — короткий отчет по learning"
     )
 
 
@@ -1391,6 +1490,7 @@ BOT_COMMANDS = [
     BotCommand("learning_add", "добавить локацию в авто-обучение"),
     BotCommand("learning_locations", "локации авто-обучения"),
     BotCommand("learning_now", "сохранить learning-прогноз сейчас"),
+    BotCommand("learning_report", "короткий отчет по learning"),
     BotCommand("export_all", "выгрузить резервную копию данных"),
     BotCommand("export_learning_csv", "выгрузить learning в CSV"),
 ]
@@ -2578,6 +2678,10 @@ async def export_learning_csv(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
+async def learning_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(build_learning_report_text())
+
+
 async def favorite_current(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str):
     context.args = [key]
     await weather(update, context)
@@ -3290,6 +3394,7 @@ def main():
     app.add_handler(CommandHandler("adaptive", adaptive))
     app.add_handler(CommandHandler("export_all", export_all))
     app.add_handler(CommandHandler("export_learning_csv", export_learning_csv))
+    app.add_handler(CommandHandler("learning_report", learning_report))
 
     app.add_handler(CommandHandler("home", favorite_home))
     app.add_handler(CommandHandler("moscow", lambda update, context: favorite_current(update, context, "moscow")))
