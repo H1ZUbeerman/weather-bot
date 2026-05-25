@@ -1187,6 +1187,37 @@ def build_consensus(location, sources):
     }
 
 
+def format_source_rows(c):
+    source_titles = {
+        "openmeteo": "Open-Meteo",
+        "weatherapi": "WeatherAPI",
+        "visualcrossing": "Visual Crossing",
+        "yr": "yr.no",
+        "meteosource": "Meteosource",
+    }
+    rows = []
+
+    for source, title in source_titles.items():
+        rows.append(
+            f"• {title}: "
+            f"{c['temp_values'].get(source)}°C, "
+            f"дождь {c['rain_values'].get(source)}, "
+            f"ветер {c['wind_values'].get(source)} км/ч"
+        )
+
+    return "\n".join(rows)
+
+
+def rain_advice(avg_rain):
+    if avg_rain >= 70:
+        return "зонт/дождевик точно лучше взять"
+    if avg_rain >= 45:
+        return "зонт лучше взять"
+    if avg_rain >= 25:
+        return "зонт по ситуации, риск есть"
+    return "зонт скорее не нужен"
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🌦 AI Weather Assistant\n\n"
@@ -1335,29 +1366,22 @@ Consensus:
 
     message = (
         f"📍 {location['name']}, {location['country']}\n\n"
-        f"🌡 Температура:\n"
-        f"🌦 Open-Meteo: {c['temp_values']['openmeteo']}°C\n"
-        f"🌤 WeatherAPI: {c['temp_values']['weatherapi']}°C\n"
-        f"🌍 Visual Crossing: {c['temp_values']['visualcrossing']}°C\n"
-        f"🇳🇴 yr.no: {c['temp_values']['yr']}°C\n"
-        f"🌐 Meteosource: {c['temp_values']['meteosource']}°C\n\n"
-        f"☔ Осадки / rain score:\n"
-        f"🌦 Open-Meteo: {c['rain_values']['openmeteo']}\n"
-        f"🌤 WeatherAPI: {c['rain_values']['weatherapi']}\n"
-        f"🌍 Visual Crossing: {c['rain_values']['visualcrossing']}\n"
-        f"🇳🇴 yr.no: {c['rain_values']['yr']}\n"
-        f"🌐 Meteosource: {c['rain_values']['meteosource']}\n\n"
-        f"🧠 Weighted Consensus:\n"
-        f"🌡 ~{c['avg_temp']}°C\n"
-        f"💨 ~{c['avg_wind']} км/ч\n"
-        f"☔ Rain Consensus: ~{c['avg_rain']}\n"
-        f"📊 Temp Spread: {c['temp_spread']}°C\n"
-        f"📊 Rain Spread: {c['rain_spread']}\n"
-        f"✅ Temp confidence: {c['temp_confidence']}\n"
-        f"✅ Rain confidence: {c['rain_confidence']}\n"
-        f"⚙️ Весовой режим: {c['weights_mode']}\n\n"
-        f"🤖 AI-вывод:\n"
-        f"{ai_summary}"
+        f"🤖 Коротко:\n"
+        f"{ai_summary}\n\n"
+
+        f"🧠 Итог по 5 источникам:\n"
+        f"🌡 Температура: ~{c['avg_temp']}°C\n"
+        f"💨 Ветер: ~{c['avg_wind']} км/ч\n"
+        f"☔ Дождь / rain score: ~{c['avg_rain']} — {rain_advice(c['avg_rain'])}\n"
+        f"✅ Надежность: температура — {c['temp_confidence']}, дождь — {c['rain_confidence']}\n\n"
+
+        f"📊 Разброс моделей:\n"
+        f"Температура: {c['temp_spread']}°C\n"
+        f"Дождь: {c['rain_spread']}\n"
+        f"Весовой режим: {c['weights_mode']}\n\n"
+
+        f"🔎 Источники:\n"
+        f"{format_source_rows(c)}"
     )
 
     await update.message.reply_text(message)
