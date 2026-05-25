@@ -13,6 +13,15 @@ from openai import OpenAI
 from telegram import BotCommand, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+from outdoor.scoring import (
+    baidarka_recommendation,
+    calculate_baidarka_score,
+    calculate_camping_score,
+    calculate_trip_score,
+    camping_recommendation,
+    trip_recommendation_from_score,
+)
+
 load_dotenv()
 
 
@@ -1411,6 +1420,16 @@ def part_status(temp, rain, wind):
     return "🟢 комфортно"
 
 
+def format_score(score):
+    if score >= 75:
+        return f"🟢 {score}/100"
+    if score >= 55:
+        return f"🟡 {score}/100"
+    if score >= 35:
+        return f"🟠 {score}/100"
+    return f"🔴 {score}/100"
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🌦 AI Weather Assistant\n\n"
@@ -1423,6 +1442,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/tomorrow_parts — завтра по частям дня\n"
         "/week — прогноз на неделю по частям дня\n"
         "/weekend — прогноз на выходные\n\n"
+        "/trip — оценка погоды для поездки\n"
+        "/camping — оценка погоды для палатки\n"
+        "/kayak — оценка погоды для байдарки\n\n"
 
         "Локации:\n"
         "/locations — все избранные места\n"
@@ -1477,6 +1499,9 @@ BOT_COMMANDS = [
     BotCommand("tomorrow", "подробный прогноз на завтра"),
     BotCommand("week", "прогноз на неделю по частям дня"),
     BotCommand("weekend", "прогноз на ближайшие выходные"),
+    BotCommand("trip", "оценка погоды для поездки"),
+    BotCommand("camping", "оценка погоды для палатки"),
+    BotCommand("kayak", "оценка погоды для байдарки"),
     BotCommand("locations", "список избранных локаций"),
     BotCommand("set_home", "выбрать домашнюю локацию"),
     BotCommand("profile", "персональные настройки рекомендаций"),
@@ -2150,6 +2175,248 @@ Rain spread {sun['rain_spread']}
         f"🤖 AI-вывод:\n"
         f"{ai_summary}"
     )
+
+    await update.message.reply_text(message)
+
+
+async def trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    location = get_location(context, chat_id=chat_id)
+
+    if not location:
+        await update.message.reply_text("Локация не найдена 😢")
+        return
+
+    try:
+        week_items = get_week_parts_sources(location)
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка анализа поездки: {e}")
+        return
+
+    scored_days = []
+
+    for item in week_items:
+        score = calculate_trip_score(item["temp"], item["rain"], item["wind"])
+        scored_days.append({**item, "score": score, "recommendation": trip_recommendation_from_score(score)})
+
+    best_day = max(scored_days, key=lambda item: item["score"])
+    worst_day = min(scored_days, key=lambda item: item["score"])
+
+    ai_prompt = f"""
+Локация:
+{location['name']}
+
+Оценка погоды для поездки на неделю:
+{scored_days}
+
+Лучший день:
+{best_day}
+
+Худший день:
+{worst_day}
+
+Дай короткий вывод:
+- стоит ли планировать поездку
+- какой день лучше
+- какие риски по дождю и ветру
+- нужен ли запасной план
+
+{build_profile_instructions(chat_id)}
+"""
+
+    ai_summary = get_ai_summary(ai_prompt)
+
+    message = (
+        f"🚗 Trip mode\n"
+        f"📍 {location['name']}, {location['country']}\n\n"
+        f"🤖 Коротко:\n"
+        f"{ai_summary}\n\n"
+        f"🏆 Лучший день: {best_day['date']} ({best_day['weekday']}) — {format_score(best_day['score'])}\n"
+        f"🌡 ~{best_day['temp']}°C, ☔ ~{best_day['rain']}%, 💨 ~{best_day['wind']} км/ч\n"
+        f"{best_day['recommendation']}\n\n"
+        f"⚠️ Худший день: {worst_day['date']} ({worst_day['weekday']}) — {format_score(worst_day['score'])}\n"
+        f"🌡 ~{worst_day['temp']}°C, ☔ ~{worst_day['rain']}%, 💨 ~{worst_day['wind']} км/ч\n"
+        f"{worst_day['recommendation']}\n\n"
+        f"📆 Неделя:\n"
+    )
+
+    for item in scored_days:
+        message += (
+            f"• {item['date']} ({item['weekday']}): {format_score(item['score'])}, "
+            f"☔ {item['rain']}%, 💨 {item['wind']} км/ч\n"
+        )
+
+    await update.message.reply_text(message)
+
+
+async def camping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    location = get_location(context, chat_id=chat_id)
+
+    if not location:
+        await update.message.reply_text("Локация не найдена 😢")
+        return
+
+    try:
+        week_items = get_week_parts_sources(location)
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка анализа палатки: {e}")
+        return
+
+    scored_days = []
+
+    for item in week_items:
+        day_part = item["parts"]["day"]
+        night_part = item["parts"]["night"]
+        day_score = calculate_camping_score(day_part["temp"], item["rain"], item["wind"])
+        night_score = calculate_camping_score(night_part["temp"], night_part["rain"], night_part["wind"], night=True)
+        score = round((day_score + night_score) / 2, 1)
+        recommendation = camping_recommendation(score, item["rain"], item["wind"], night_part["temp"])
+        scored_days.append({
+            **item,
+            "score": score,
+            "day_temp": day_part["temp"],
+            "night_temp": night_part["temp"],
+            "recommendation": recommendation,
+        })
+
+    best_day = max(scored_days, key=lambda item: item["score"])
+    worst_day = min(scored_days, key=lambda item: item["score"])
+
+    ai_prompt = f"""
+Локация:
+{location['name']}
+
+Оценка погоды для палатки:
+{scored_days}
+
+Лучший день:
+{best_day}
+
+Худший день:
+{worst_day}
+
+Дай короткий вывод:
+- стоит ли ехать с палаткой
+- какая ночь комфортнее
+- риск дождя ночью
+- риск ветра
+- что взять с собой
+
+{build_profile_instructions(chat_id)}
+"""
+
+    ai_summary = get_ai_summary(ai_prompt)
+
+    message = (
+        f"🏕 Camping mode\n"
+        f"📍 {location['name']}, {location['country']}\n\n"
+        f"🤖 Коротко:\n"
+        f"{ai_summary}\n\n"
+        f"🏆 Лучший день: {best_day['date']} ({best_day['weekday']}) — {format_score(best_day['score'])}\n"
+        f"🌡 День ~{best_day['day_temp']}°C / Ночь ~{best_day['night_temp']}°C\n"
+        f"☔ ~{best_day['rain']}%, 💨 ~{best_day['wind']} км/ч\n"
+        f"{best_day['recommendation']}\n\n"
+        f"⚠️ Худший день: {worst_day['date']} ({worst_day['weekday']}) — {format_score(worst_day['score'])}\n"
+        f"🌡 День ~{worst_day['day_temp']}°C / Ночь ~{worst_day['night_temp']}°C\n"
+        f"☔ ~{worst_day['rain']}%, 💨 ~{worst_day['wind']} км/ч\n"
+        f"{worst_day['recommendation']}\n\n"
+        f"📆 Неделя:\n"
+    )
+
+    for item in scored_days:
+        message += (
+            f"• {item['date']} ({item['weekday']}): {format_score(item['score'])}, "
+            f"ночь ~{item['night_temp']}°C, ☔ {item['rain']}%, 💨 {item['wind']} км/ч\n"
+        )
+
+    await update.message.reply_text(message)
+
+
+async def kayak(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    location = get_location(context, chat_id=chat_id)
+
+    if not location:
+        await update.message.reply_text("Локация не найдена 😢")
+        return
+
+    try:
+        today_parts_data = get_hourly_parts_sources(location)
+        tomorrow_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        tomorrow_parts_data = get_hourly_parts_sources(location, tomorrow_date)
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка анализа байдарки: {e}")
+        return
+
+    windows = []
+
+    for day_label, date_label, parts_data in [
+        ("Сегодня", datetime.now().strftime("%Y-%m-%d"), today_parts_data),
+        ("Завтра", tomorrow_date, tomorrow_parts_data),
+    ]:
+        for key in ["morning", "day", "evening"]:
+            part = parts_data.get(key, {})
+            score = calculate_baidarka_score(part.get("temp", 0), part.get("rain", 0), part.get("wind", 0))
+            recommendation = baidarka_recommendation(score, part.get("wind", 0), part.get("rain", 0))
+            windows.append({
+                "day_label": day_label,
+                "date": date_label,
+                "part_title": part.get("title", key),
+                "temp": part.get("temp", 0),
+                "rain": part.get("rain", 0),
+                "wind": part.get("wind", 0),
+                "score": score,
+                "recommendation": recommendation,
+            })
+
+    best_window = max(windows, key=lambda item: item["score"])
+    worst_window = min(windows, key=lambda item: item["score"])
+
+    ai_prompt = f"""
+Локация:
+{location['name']}
+
+Оценка окон для байдарки:
+{windows}
+
+Лучшее окно:
+{best_window}
+
+Худшее окно:
+{worst_window}
+
+Дай короткий вывод:
+- можно ли выходить на воду
+- когда лучшее окно
+- главные риски по ветру/дождю
+- когда лучше отказаться
+
+{build_profile_instructions(chat_id)}
+"""
+
+    ai_summary = get_ai_summary(ai_prompt)
+
+    message = (
+        f"🚣 Kayak mode\n"
+        f"📍 {location['name']}, {location['country']}\n\n"
+        f"🤖 Коротко:\n"
+        f"{ai_summary}\n\n"
+        f"🏆 Лучшее окно: {best_window['day_label']} {best_window['date']} — {best_window['part_title']}\n"
+        f"{format_score(best_window['score'])}: 🌡 ~{best_window['temp']}°C, "
+        f"☔ ~{best_window['rain']}%, 💨 ~{best_window['wind']} км/ч\n"
+        f"{best_window['recommendation']}\n\n"
+        f"⚠️ Худшее окно: {worst_window['day_label']} {worst_window['date']} — {worst_window['part_title']}\n"
+        f"{format_score(worst_window['score'])}: 🌡 ~{worst_window['temp']}°C, "
+        f"☔ ~{worst_window['rain']}%, 💨 ~{worst_window['wind']} км/ч\n\n"
+        f"🕒 Окна:\n"
+    )
+
+    for item in sorted(windows, key=lambda row: row["score"], reverse=True):
+        message += (
+            f"• {item['day_label']} {item['part_title']}: {format_score(item['score'])}, "
+            f"☔ {item['rain']}%, 💨 {item['wind']} км/ч\n"
+        )
 
     await update.message.reply_text(message)
 
@@ -3366,6 +3633,9 @@ def main():
     app.add_handler(CommandHandler("tomorrow_parts", tomorrow_parts))
     app.add_handler(CommandHandler("tomorrow", tomorrow))
     app.add_handler(CommandHandler("week", week))
+    app.add_handler(CommandHandler("trip", trip))
+    app.add_handler(CommandHandler("camping", camping))
+    app.add_handler(CommandHandler("kayak", kayak))
     app.add_handler(CommandHandler("set_home", set_home))
     app.add_handler(CommandHandler("locations", locations))
     app.add_handler(CommandHandler("profile", profile))
