@@ -35,6 +35,7 @@ USER_SETTINGS_FILE = "settings.json"
 MORNING_SUBSCRIBERS_FILE = "morning_subscribers.json"
 LEARNING_FILE = "learning_forecasts.json"
 DANGER_SUBSCRIBERS_FILE = "danger_subscribers.json"
+RAIN_ALERT_SUBSCRIBERS_FILE = "rain_alert_subscribers.json"
 DEFAULT_TIMEZONE = "Europe/Moscow"
 PROFILE_OPTIONS = {
     "cold": {
@@ -259,6 +260,25 @@ def save_morning_subscribers(subscribers):
     save_json_file(MORNING_SUBSCRIBERS_FILE, subscribers)
 
 
+def load_rain_alert_subscribers():
+    subscribers = load_json_file(RAIN_ALERT_SUBSCRIBERS_FILE, [])
+    return subscribers if isinstance(subscribers, list) else []
+
+
+def save_rain_alert_subscribers(subscribers):
+    save_json_file(RAIN_ALERT_SUBSCRIBERS_FILE, subscribers)
+
+
+def find_rain_alert_subscriber(subscribers, chat_id):
+    chat_key = str(chat_id)
+
+    for subscriber in subscribers:
+        if str(subscriber.get("chat_id")) == chat_key:
+            return subscriber
+
+    return None
+
+
 def load_learning_forecasts():
     forecasts = load_json_file(LEARNING_FILE, [])
     return forecasts if isinstance(forecasts, list) else []
@@ -397,18 +417,41 @@ def rain_score_from_mm(mm):
     return 0
 
 
-def save_forecast_history(location_name, forecast_data):
+def save_forecast_history(location_name, forecast_data, chat_id=None):
     history = load_json_file(HISTORY_FILE, [])
-    history.append({
+    item = {
         "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "location": location_name,
-        "forecast": forecast_data
-    })
+        "forecast": forecast_data,
+    }
+
+    if chat_id is not None:
+        item["chat_id"] = str(chat_id)
+
+    history.append(item)
     save_json_file(HISTORY_FILE, history)
 
 
 def load_history():
     return load_json_file(HISTORY_FILE, [])
+
+
+def find_last_history_item(chat_id=None, location=None):
+    history_items = load_history()
+
+    for item in reversed(history_items):
+        if chat_id is not None and item.get("chat_id") != str(chat_id):
+            continue
+
+        if location is not None and item.get("location") != location.get("name"):
+            continue
+
+        return item
+
+    if chat_id is None and location is None:
+        return history_items[-1] if history_items else None
+
+    return None
 
 
 def load_scores():
@@ -817,6 +860,159 @@ def get_hourly_parts_sources(location, target_date=None):
     return part_values
 
 
+def get_week_parts_sources(location, days=7):
+    lat = location["latitude"]
+    lon = location["longitude"]
+
+    data = requests.get(
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat}"
+        f"&longitude={lon}"
+        "&hourly=temperature_2m,precipitation_probability,wind_speed_10m"
+        f"&forecast_days={days}"
+        "&timezone=auto",
+        timeout=20,
+    ).json()
+
+    hourly = data.get("hourly", {})
+    times = hourly.get("time", [])
+    temps = hourly.get("temperature_2m", [])
+    rain_probs = hourly.get("precipitation_probability", [])
+    winds = hourly.get("wind_speed_10m", [])
+
+    dates = []
+
+    for time_str in times:
+        date_str = datetime.fromisoformat(time_str).strftime("%Y-%m-%d")
+
+        if date_str not in dates:
+            dates.append(date_str)
+
+        if len(dates) >= days:
+            break
+
+    week_items = []
+
+    for date_str in dates:
+        parts = {}
+
+        for part_key, part in DAY_PARTS.items():
+            part_temps = []
+            part_rains = []
+            part_winds = []
+            start_hour = part["start_hour"]
+            end_hour = part["end_hour"]
+
+            for idx, time_str in enumerate(times):
+                dt = datetime.fromisoformat(time_str)
+                hour = dt.hour
+                item_date = dt.strftime("%Y-%m-%d")
+                adjusted_hour = hour
+
+                if part_key == "night" and hour < 6:
+                    previous_date = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
+                    item_date = previous_date
+                    adjusted_hour = hour + 24
+
+                if item_date != date_str:
+                    continue
+
+                if start_hour <= adjusted_hour < end_hour:
+                    if idx < len(temps):
+                        part_temps.append(temps[idx])
+                    if idx < len(rain_probs):
+                        part_rains.append(rain_probs[idx])
+                    if idx < len(winds):
+                        part_winds.append(winds[idx])
+
+            parts[part_key] = {
+                "title": part["title"],
+                "temp": simple_average(part_temps),
+                "rain": round(max(part_rains), 1) if part_rains else 0,
+                "wind": round(max(part_winds), 1) if part_winds else 0,
+            }
+
+        day_rain = max(part["rain"] for part in parts.values())
+        day_wind = max(part["wind"] for part in parts.values())
+        day_temps = [part["temp"] for part in parts.values() if part["temp"] is not None]
+        day_temp = simple_average(day_temps)
+
+        week_items.append({
+            "date": date_str,
+            "weekday": datetime.fromisoformat(date_str).strftime("%a"),
+            "parts": parts,
+            "temp": day_temp,
+            "rain": day_rain,
+            "wind": day_wind,
+        })
+
+    return week_items
+
+
+def get_rain_alert_status(location, hours=3):
+    lat = location["latitude"]
+    lon = location["longitude"]
+
+    data = requests.get(
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat}"
+        f"&longitude={lon}"
+        "&current=precipitation,rain,showers,weather_code"
+        "&hourly=precipitation_probability,precipitation,weather_code"
+        "&forecast_days=1"
+        "&timezone=auto",
+        timeout=20,
+    ).json()
+
+    current = data.get("current", {})
+    current_precip = current.get("precipitation", 0) or current.get("rain", 0) or current.get("showers", 0) or 0
+    current_code = current.get("weather_code")
+
+    hourly = data.get("hourly", {})
+    times = hourly.get("time", [])
+    probs = hourly.get("precipitation_probability", [])
+    precips = hourly.get("precipitation", [])
+    codes = hourly.get("weather_code", [])
+
+    now = datetime.now(ZoneInfo(DEFAULT_TIMEZONE)).replace(tzinfo=None)
+    next_items = []
+
+    for idx, time_str in enumerate(times):
+        dt = datetime.fromisoformat(time_str)
+
+        if dt < now:
+            continue
+
+        if len(next_items) >= hours:
+            break
+
+        next_items.append({
+            "time": dt.strftime("%H:%M"),
+            "probability": probs[idx] if idx < len(probs) else 0,
+            "precipitation": precips[idx] if idx < len(precips) else 0,
+            "code": codes[idx] if idx < len(codes) else None,
+        })
+
+    max_probability = max((item["probability"] for item in next_items), default=0)
+    max_precipitation = max((item["precipitation"] for item in next_items), default=0)
+    rain_codes = {51, 53, 55, 61, 63, 65, 80, 81, 82, 95, 96, 99}
+    current_is_rain = current_precip > 0 or current_code in rain_codes
+    forecast_is_rain = max_probability >= 50 or max_precipitation >= 0.5 or any(item["code"] in rain_codes for item in next_items)
+    should_alert = current_is_rain or forecast_is_rain
+
+    signature = f"{datetime.now(ZoneInfo(DEFAULT_TIMEZONE)).strftime('%Y-%m-%d-%H')}:{round(max_probability)}:{round(max_precipitation, 1)}:{round(current_precip, 1)}"
+
+    return {
+        "should_alert": should_alert,
+        "current_precip": current_precip,
+        "current_code": current_code,
+        "max_probability": max_probability,
+        "max_precipitation": max_precipitation,
+        "next_items": next_items,
+        "signature": signature,
+    }
+
+
 def get_daily_sources(location, date_obj):
     lat = location["latitude"]
     lon = location["longitude"]
@@ -1001,6 +1197,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/today_parts — сегодня: утро/день/вечер/ночь\n"
         "/tomorrow — подробный прогноз на завтра\n"
         "/tomorrow_parts — завтра по частям дня\n"
+        "/week — прогноз на неделю по частям дня\n"
         "/weekend — прогноз на выходные\n\n"
 
         "Локации:\n"
@@ -1021,6 +1218,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/morning_time 08:30 — задать время\n"
         "/morning_now — проверить сейчас\n"
         "/morning_off — выключить\n\n"
+
+        "Дождевые алерты:\n"
+        "/rain_alert_on — включить\n"
+        "/rain_alert_now — проверить сейчас\n"
+        "/rain_alert_off — выключить\n\n"
 
         "Auto-learning:\n"
         "/learning_on — включить обучение\n"
@@ -1046,30 +1248,21 @@ BOT_COMMANDS = [
     BotCommand("home", "погода по твоей домашней локации"),
     BotCommand("today_parts", "сегодня по частям дня"),
     BotCommand("tomorrow", "подробный прогноз на завтра"),
-    BotCommand("tomorrow_parts", "завтра по частям дня"),
+    BotCommand("week", "прогноз на неделю по частям дня"),
     BotCommand("weekend", "прогноз на ближайшие выходные"),
     BotCommand("locations", "список избранных локаций"),
     BotCommand("set_home", "выбрать домашнюю локацию"),
     BotCommand("profile", "персональные настройки рекомендаций"),
     BotCommand("morning_on", "включить утренний брифинг"),
-    BotCommand("morning_off", "выключить утренний брифинг"),
     BotCommand("morning_time", "задать время утреннего брифинга"),
     BotCommand("morning_now", "получить утренний брифинг сейчас"),
+    BotCommand("rain_alert_on", "включить дождевые алерты"),
+    BotCommand("rain_alert_now", "проверить дождь сейчас"),
     BotCommand("learning_on", "включить авто-обучение"),
-    BotCommand("learning_off", "выключить авто-обучение"),
     BotCommand("learning_status", "статус авто-обучения"),
     BotCommand("learning_add", "добавить локацию в авто-обучение"),
-    BotCommand("learning_remove", "убрать локацию из авто-обучения"),
     BotCommand("learning_locations", "локации авто-обучения"),
     BotCommand("learning_now", "сохранить learning-прогноз сейчас"),
-    BotCommand("learning_verify_now", "проверить learning-прогнозы сейчас"),
-    BotCommand("scores", "точность моделей по температуре"),
-    BotCommand("rain_scores", "точность моделей по дождю"),
-    BotCommand("adaptive", "текущие адаптивные веса моделей"),
-    BotCommand("history", "последние сохранённые прогнозы"),
-    BotCommand("analyze", "анализ истории прогнозов"),
-    BotCommand("verify", "проверить последний прогноз температуры"),
-    BotCommand("verify_rain", "проверить последний прогноз дождя"),
 ]
 
 
@@ -1138,7 +1331,7 @@ Consensus:
         "rain_spread": c["rain_spread"],
     }
 
-    save_forecast_history(location["name"], forecast_history)
+    save_forecast_history(location["name"], forecast_history, chat_id=chat_id)
 
     message = (
         f"📍 {location['name']}, {location['country']}\n\n"
@@ -1277,6 +1470,69 @@ async def tomorrow_parts(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💨 Ветер: до ~{part['wind']} км/ч\n"
             f"✅ Rain confidence: {rain_confidence}\n\n"
         )
+
+    message += (
+        f"🤖 AI-вывод:\n"
+        f"{ai_summary}"
+    )
+
+    await update.message.reply_text(message)
+
+
+async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    location = get_location(context, chat_id=chat_id)
+
+    if not location:
+        await update.message.reply_text("Локация не найдена 😢")
+        return
+
+    try:
+        week_items = get_week_parts_sources(location)
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка получения прогноза на неделю: {e}")
+        return
+
+    ai_prompt = f"""
+Локация:
+{location['name']}
+
+Прогноз на неделю по частям дня:
+{week_items}
+
+Дай короткий практичный вывод:
+- какие дни лучшие
+- где выше риск дождя
+- когда лучше планировать поездки/прогулки
+- что важно по ветру
+
+{build_profile_instructions(chat_id)}
+"""
+
+    ai_summary = get_ai_summary(ai_prompt)
+
+    message = (
+        f"📆 Прогноз на неделю\n"
+        f"📍 {location['name']}, {location['country']}\n"
+        f"Источник: Open-Meteo hourly\n\n"
+    )
+
+    for item in week_items:
+        message += (
+            f"📅 {item['date']} ({item['weekday']})\n"
+            f"Итого: 🌡 ~{item['temp']}°C, ☔ до ~{item['rain']}%, 💨 до ~{item['wind']} км/ч\n"
+        )
+
+        for key in ["morning", "day", "evening", "night"]:
+            part = item["parts"][key]
+            message += (
+                f"{part['title']}: "
+                f"~{part['temp']}°C, "
+                f"☔ ~{part['rain']}%, "
+                f"💨 ~{part['wind']} км/ч\n"
+            )
+
+        message += "\n"
 
     message += (
         f"🤖 AI-вывод:\n"
@@ -1678,13 +1934,20 @@ Rain spread {sun['rain_spread']}
 
 
 async def verify_rain(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    history_items = load_history()
+    chat_id = update.effective_chat.id
+    requested_location = get_location(context, chat_id=chat_id)
+    last_item = find_last_history_item(chat_id=chat_id, location=requested_location)
 
-    if not history_items:
-        await update.message.reply_text("История пока пустая 😢")
+    if not last_item:
+        last_item = find_last_history_item(location=requested_location)
+
+    if not last_item:
+        await update.message.reply_text(
+            f"Нет сохранённого прогноза для {requested_location['name']}.\n"
+            f"Сначала вызови /weather"
+        )
         return
 
-    last_item = history_items[-1]
     location_name = last_item["location"]
     forecast = last_item["forecast"]
 
@@ -1882,13 +2145,20 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    history_items = load_history()
+    chat_id = update.effective_chat.id
+    requested_location = get_location(context, chat_id=chat_id)
+    last_item = find_last_history_item(chat_id=chat_id, location=requested_location)
 
-    if not history_items:
-        await update.message.reply_text("История пока пустая 😢")
+    if not last_item:
+        last_item = find_last_history_item(location=requested_location)
+
+    if not last_item:
+        await update.message.reply_text(
+            f"Нет сохранённого прогноза для {requested_location['name']}.\n"
+            f"Сначала вызови /weather"
+        )
         return
 
-    last_item = history_items[-1]
     location_name = last_item["location"]
     forecast = last_item["forecast"]
 
@@ -2027,6 +2297,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     adaptive_weights = get_adaptive_weights_from_scores()
     morning_subscribers_count = count_json_items(MORNING_SUBSCRIBERS_FILE)
     danger_subscribers_count = count_json_items(DANGER_SUBSCRIBERS_FILE)
+    rain_alert_subscribers_count = count_json_items(RAIN_ALERT_SUBSCRIBERS_FILE)
     learning_forecasts_count = count_json_items(LEARNING_FILE)
 
     total_temp_checks = sum(
@@ -2119,6 +2390,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         f"🔔 Подписки и автоматика:\n"
         f"🌅 Morning subscribers: {morning_subscribers_count}\n"
+        f"☔ Rain alert subscribers: {rain_alert_subscribers_count}\n"
         f"🚨 Danger subscribers: {danger_subscribers_count}\n"
         f"🧪 Learning forecasts: {learning_forecasts_count}\n\n"
 
@@ -2421,6 +2693,130 @@ async def check_morning_alerts(context: ContextTypes.DEFAULT_TYPE):
         save_morning_subscribers(subscribers)
 
 
+async def rain_alert_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    location_key = context.args[0].lower() if context.args else "home"
+
+    if location_key not in FAVORITE_LOCATIONS:
+        available_locations = build_location_options(command_prefix="/rain_alert_on")
+
+        await update.message.reply_text(
+            f"Такой локации нет 😢\n\n"
+            f"Доступные варианты:\n"
+            f"{available_locations}"
+        )
+        return
+
+    subscribers = load_rain_alert_subscribers()
+    subscriber = find_rain_alert_subscriber(subscribers, chat_id)
+
+    if subscriber:
+        subscriber["location_key"] = location_key
+    else:
+        subscribers.append({
+            "chat_id": str(chat_id),
+            "location_key": location_key,
+            "created_at": datetime.now(ZoneInfo(DEFAULT_TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S"),
+            "last_signature": "",
+        })
+
+    save_rain_alert_subscribers(subscribers)
+
+    location_text = "твой home" if location_key == "home" else FAVORITE_LOCATIONS[location_key]["name"]
+
+    await update.message.reply_text(
+        f"✅ Дождевые алерты включены.\n\n"
+        f"📍 Локация: {location_text}\n"
+        f"Бот будет проверять дождь примерно раз в 15 минут.\n"
+        f"Проверить сейчас: /rain_alert_now"
+    )
+
+
+async def rain_alert_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    subscribers = load_rain_alert_subscribers()
+    updated_subscribers = [
+        subscriber
+        for subscriber in subscribers
+        if str(subscriber.get("chat_id")) != str(chat_id)
+    ]
+
+    save_rain_alert_subscribers(updated_subscribers)
+
+    await update.message.reply_text("✅ Дождевые алерты выключены.")
+
+
+async def rain_alert_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    subscribers = load_rain_alert_subscribers()
+    subscriber = find_rain_alert_subscriber(subscribers, chat_id)
+
+    if subscriber:
+        location = resolve_subscriber_location(subscriber)
+    else:
+        location = get_home_location_for_chat(chat_id)
+
+    try:
+        status = get_rain_alert_status(location)
+    except Exception as e:
+        await update.message.reply_text(f"Не смог проверить дождь: {e}")
+        return
+
+    next_lines = "\n".join(
+        f"• {item['time']}: вероятность {item['probability']}%, осадки {item['precipitation']} мм"
+        for item in status["next_items"]
+    )
+
+    alert_text = "есть риск дождя / дождь уже идёт" if status["should_alert"] else "существенного риска дождя нет"
+
+    await update.message.reply_text(
+        f"☔ Проверка дождя\n"
+        f"📍 {location['name']}\n\n"
+        f"Сейчас осадки: {status['current_precip']} мм\n"
+        f"Макс. вероятность в ближайшие часы: {status['max_probability']}%\n"
+        f"Макс. осадки в ближайшие часы: {status['max_precipitation']} мм\n"
+        f"Итог: {alert_text}\n\n"
+        f"{next_lines}"
+    )
+
+
+async def check_rain_alerts(context: ContextTypes.DEFAULT_TYPE):
+    subscribers = load_rain_alert_subscribers()
+    changed = False
+
+    for subscriber in subscribers:
+        try:
+            location = resolve_subscriber_location(subscriber)
+            status = get_rain_alert_status(location)
+
+            if not status["should_alert"]:
+                continue
+
+            if subscriber.get("last_signature") == status["signature"]:
+                continue
+
+            await context.bot.send_message(
+                chat_id=subscriber["chat_id"],
+                text=(
+                    f"☔ Дождевой алерт\n"
+                    f"📍 {location['name']}\n\n"
+                    f"Сейчас осадки: {status['current_precip']} мм\n"
+                    f"Макс. вероятность в ближайшие часы: {status['max_probability']}%\n"
+                    f"Макс. осадки в ближайшие часы: {status['max_precipitation']} мм\n\n"
+                    f"Лучше взять зонт/дождевик."
+                ),
+            )
+
+            subscriber["last_signature"] = status["signature"]
+            changed = True
+
+        except Exception as e:
+            print("Rain alert error:", e)
+
+    if changed:
+        save_rain_alert_subscribers(subscribers)
+
+
 async def learning_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     location_key = context.args[0].lower() if context.args else "home"
@@ -2709,6 +3105,7 @@ def main():
     app.add_handler(CommandHandler("today_parts", today_parts))
     app.add_handler(CommandHandler("tomorrow_parts", tomorrow_parts))
     app.add_handler(CommandHandler("tomorrow", tomorrow))
+    app.add_handler(CommandHandler("week", week))
     app.add_handler(CommandHandler("set_home", set_home))
     app.add_handler(CommandHandler("locations", locations))
     app.add_handler(CommandHandler("profile", profile))
@@ -2716,6 +3113,9 @@ def main():
     app.add_handler(CommandHandler("morning_off", morning_off))
     app.add_handler(CommandHandler("morning_time", morning_time))
     app.add_handler(CommandHandler("morning_now", morning_now))
+    app.add_handler(CommandHandler("rain_alert_on", rain_alert_on))
+    app.add_handler(CommandHandler("rain_alert_off", rain_alert_off))
+    app.add_handler(CommandHandler("rain_alert_now", rain_alert_now))
     app.add_handler(CommandHandler("learning_on", learning_on))
     app.add_handler(CommandHandler("learning_off", learning_off))
     app.add_handler(CommandHandler("learning_status", learning_status))
@@ -2743,6 +3143,7 @@ def main():
 
     if app.job_queue:
         app.job_queue.run_repeating(check_morning_alerts, interval=60, first=10)
+        app.job_queue.run_repeating(check_rain_alerts, interval=900, first=30)
         app.job_queue.run_repeating(check_learning_schedule, interval=60, first=20)
     else:
         print("Job queue недоступен: расписания morning/learning не запущены")

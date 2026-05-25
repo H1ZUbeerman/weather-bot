@@ -12,6 +12,7 @@ model_scores.json
 rain_scores.json
 morning_subscribers.json
 danger_subscribers.json
+rain_alert_subscribers.json
 last_alert_signatures.json
 learning_forecasts.json
 user_settings.json
